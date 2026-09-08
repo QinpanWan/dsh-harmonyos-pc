@@ -1,8 +1,10 @@
 #!/bin/sh
+mkdir -p "$HOME/dsh-diag/reports" 2>/dev/null
 # dsh web 服务:启动/重启 (127.0.0.1:3080)。用法: sh scripts/dsh-web.sh
 # 环境变量可覆盖: NODE_BIN(节点路径) DSH_DIR(dsh 安装目录) PATCH_YML(适配补丁) PORT LOG
 # HarmonyOS 适配: 必须用 node v22(本机 deveco 自带) + compat-loader(补 zstd/stripTypeScriptTypes)；
 # node v24 新进程 V8 code-range 分配会原生崩溃(ENOMEM)。补丁默认定位仓库内 harmony.patch.yml。
+# 日志采用追加+run 头部, 避免每次重启清空导致无法看崩溃现场。
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 NODE="${NODE_BIN:-$HOME/deveco/deveco_tools/node/bin/node}"
 DIR="${DSH_DIR:-$HOME/dsh-test}"
@@ -55,10 +57,11 @@ if ! curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$MC_PORT/plugins.json";
 fi
 export DSHM_REGISTRY_URL="http://127.0.0.1:$MC_PORT/plugins.json"
 
+echo "===== dsh-web start $(date '+%F %T') =====" >> "$LOG"
 nohup "$NODE" --expose-internals --experimental-sqlite \
   --experimental-loader "$DIR/compat-loader.mjs" \
-  node_modules/@deepseek-ai/dsh/lib/bin.js \
-  --profile web --patch "$PATCH" --no-open > "$LOG" 2>&1 &
+  --report-on-fatalerror --report-uncaught-exception --report-directory="$HOME/dsh-diag/reports" node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --profile web --patch "$PATCH" --no-open >> "$LOG" 2>&1 &
 echo $! > "$PIDF"
 
 for i in $(seq 1 30); do
@@ -70,6 +73,6 @@ if is_up; then
   echo "dsh-web: http://127.0.0.1:$PORT/ (pid $(cat "$PIDF"))"
 else
   echo "dsh-web: FAILED to start (see $LOG)"
-  head -5 "$LOG"
+  tail -n 5 "$LOG"
   exit 1
 fi

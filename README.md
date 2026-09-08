@@ -446,6 +446,18 @@ MIT License，见 [LICENSE](LICENSE)。
 
 ## 更新记录
 
+### 2026-09-09 — 跟进官方 0.1.3-alpha.2（历史会话迁移兼容 + loader 分帧压缩）
+
+dsh 官方更新至 `0.1.3-alpha.2`（2026-09-08 发布，本机 dsh-test 已升级）。官方把 released-v0 会话冻结为只读校验并新增 v0→v2 世代迁移，对开发期产生的旧日志校验过严，升级后出现「全部会话历史加载失败 / 模型无法加载」：
+
+- **worker.cjs 迁移校验改主线程（`patchSessionVerify()`）+ CJS zstd 孪生 `compat-loader-cjs.cjs`**：官方迁移校验默认起 worker_threads，worker 用 CJS `require` 拉 ESM 包，node v22.7.0 不支持 `require(esm)`；改回主线程 `verifyCurrentGeneration`（同一模块、fzstd 同步解码可用），代价仅是迁移校验不隔离线程。
+- **v0→v1 冻结校验兼容补丁（新增 `patchSessionFormat()`，纳入 patchAll 幂等重打）**：只放行两类历史遗留数据——插件 `source.form:"guard"`（prompt-antivirus / huawei-devdocs 守卫消息，非 released v0 表单）与 `subagent/descriptor` version 2（deepseek-harness 开发期会话）；其余仍按上游封闭清单校验。全量 251 个 v0 会话用官方 format catalog 迁移探测：修复前 107 个拒绝 → 修复后 0 个失败。
+- **compat-loader 压缩分帧**：WASM zstd 对单帧 >4~8MB 输入直接 OOM，历史会话迁移发布会把整段日志一次性压缩，20MB+ 大会话必然 abort；`createZstdCompress` 改按 2MB 分帧压缩后拼接，读取端按帧独立解码，输出语义与单帧等价。
+- **`harmony.patch.yml` 追加禁用 `open-in-app` + `ui-open-in-app`**：web-app bundle 新增 open-in-app(host) 依赖 `dsh-subprocess`/`dsh-native-command` 原生 spawn（鸿蒙不可用）→ host 永远 pending → 插件树整棵加载失败。
+- **插件不再写非标准 `source.form`**：prompt-antivirus / huawei-devdocs 守卫消息去掉 `form:"guard"`（source 仅保留 `kind` + `plugin`），避免新会话继续向日志写入 released 校验不接受的自定义表单。
+
+验证：dsh 重启后 3080 正常、无 OOM；251/251 会话通过官方迁移链读到 v2。
+
 ### 2026-09-03 — 跟进官方 0.1.2-rc.1（9 处补丁锚点全命中 + 2 个自更新器兼容修复）
 
 dsh 官方更新至 `0.1.2-rc.1`（2026-09-03 发布），本机 dsh-test 已升级并验证 web 可启动。九个 node_modules 补丁的内容锚点在 rc.1 全部命中，重打后 3080 正常：

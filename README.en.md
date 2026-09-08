@@ -362,6 +362,18 @@ This project does not include dsh source code; it only contains independently wr
 
 ## Changelog
 
+### 2026-09-09 — Follow official 0.1.3-alpha.2 (legacy-session migration compat + loader frame-split compression)
+
+dsh upgraded to official `0.1.3-alpha.2` (released 2026-09-08; local dsh-test upgraded). The official release freezes released-v0 sessions to read-only validation and adds v0→v2 generation migration; the frozen checks are too strict for dev-era logs, so every session history failed to load after the upgrade ("model cannot load"):
+
+- **worker.cjs migration verification moved back to the main thread (`patchSessionVerify()`) + CJS zstd twin `compat-loader-cjs.cjs`**: the official migration verifier defaults to worker_threads; the worker pulls ESM packages via CJS `require`, which node v22.7.0 cannot do. It now verifies on the main thread (`verifyCurrentGeneration`, same module, fzstd sync decode available) at the cost of losing thread isolation.
+- **v0→v1 frozen-validation compat patch (new idempotent `patchSessionFormat()` in `patchAll`)**: only two legacy data shapes are admitted — plugin `source.form:"guard"` (guard messages from prompt-antivirus / huawei-devdocs; not a released-v0 form) and `subagent/descriptor` version 2 (deepseek-harness dev-era sessions). Everything else keeps the upstream closed whitelist. Full probe over all 251 v0 sessions through the official format catalog: 107 refused before → 0 failures after.
+- **compat-loader frame-split compression**: the WASM zstd codec OOMs on single frames over ~4-8MB; migration publishing compresses an entire log at once, so 20MB+ sessions always aborted. `createZstdCompress` now compresses in 2MB frames and concatenates them; readers decode frames independently, so output semantics equal a single frame.
+- **`harmony.patch.yml` disables `open-in-app` + `ui-open-in-app`**: the web-app bundle gained an open-in-app (host) plugin depending on native spawn (`dsh-subprocess`/`dsh-native-command`, unavailable on HarmonyOS) → the host stayed pending → the whole plugin tree failed to load.
+- **Plugins stop writing non-standard `source.form`**: prompt-antivirus / huawei-devdocs guard messages drop `form:"guard"` (source keeps only `kind` + `plugin`) so new sessions no longer persist custom forms the released validator rejects.
+
+Verified: after restart, 3080 is healthy with no OOM; all 251 sessions migrate to v2 through the official chain.
+
 ### 2026-09-03 — Follow official 0.1.2-rc.1 (all 9 patch anchors hit + 2 self-updater compat fixes)
 
 dsh upgraded to official `0.1.2-rc.1` (released 2026-09-03); the local dsh-test is synced and the web UI verified to start. All nine node_modules patch anchors matched rc.1, and after re-applying, 3080 behaves normally:

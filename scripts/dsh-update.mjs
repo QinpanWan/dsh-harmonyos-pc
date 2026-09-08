@@ -22,6 +22,10 @@ const ATTACH_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-attachmen
 // 即使目标不存在也失败；补丁在确认目标缺失后改按 rename 发布，保住 create-if-absent 语义。
 // 官方 alpha.2/alpha.3 均未含此兜底，升级重装会被冲掉，故必须纳入 patchAll 幂等重打。
 const FS_LOCAL_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-fs-local', 'lib', 'index.js');
+// 官方 0.1.3-alpha.2 起 CLI/subprocess 入口用 import.meta.main 判等(官方基线 node ≥22.18)；
+// 鸿蒙自带 node v22.7.0 无该字段(undefined)→入口静默退出码 0，需打回 argv[1]+metaUrl 等价判等。
+const BIN_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+const RUNNER_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-subprocess-local', 'lib', 'runner.js');
 // 0.1.2-alpha.2 起官方把裸插件名解析交给 node 内部 ESM loader(internal.import(name, baseUrl))；
 // 鸿蒙自带 node v22.7.0 的内部 loader 既无 getOrCreateModuleJob 也无 getModuleJobForImport，
 // ModuleLoader.fromInternal() 因此判定 shape 未知并返回 undefined → 裸插件名从 dsh-test 解析，
@@ -39,6 +43,18 @@ const CONN_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-client-conn
 const VISUAL_FILE = join(HOME, '.dsh', 'profiles', 'web', 'plugins-src', 'dsh-visual-plugin', 'lib', 'index.js');
 const MARK = 'HarmonyOS patch';
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// compat-loader 是 dsh-web.sh 的运行时 ESM polyfill(loader hook 重写 node:zlib/node:module，
+// 补 node-24 zstd 导出)；worker.cjs 走 CJS require 不受 loader 管辖，另配 CJS 孪生 shim。
+// 本仓库 scripts/ 下为权威副本，patch/install 时自动同步进 dsh-test 并改写 worker 引用。
+const LOADER_MJS = join(__dirname, 'compat-loader.mjs');
+const LOADER_CJS = join(__dirname, 'compat-loader-cjs.cjs');
+const DSH_LOADER_MJS = join(DSH_DIR, 'compat-loader.mjs');
+const DSH_LOADER_CJS = join(DSH_DIR, 'compat-loader-cjs.cjs');
+const WORKER_CJS_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'worker.cjs');
+// 0.1.3-alpha.2 起官方冻结 released-v0 校验：本机旧会话若含插件 source.form:"guard"（prompt-antivirus /
+// huawei-devdocs 守卫消息）或 deepseek-harness 开发期 subagent descriptor v2，整段 v0→v1 迁移被拒，
+// 表现为「全部会话历史加载失败」。需给 dsh-session-format-v0-to-v1 冻结校验打兼容补丁，纳入 patchAll 幂等重打。
+const SESSION_FORMAT_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-session-format-v0-to-v1', 'lib', 'index.js');
 
 function log(...parts) {
   const line = `[${new Date().toISOString()}] ${parts.join(' ')}`;
@@ -195,34 +211,47 @@ function patchAttachment() {
   } else if (!patched.includes('let handle;\n\t\t\thandle = await open(path, constants.O_RDONLY)')) {
     throw new Error('attachment 补丁锚点缺失(syncDirectory 只读句柄)，需手动处理: ' + ATTACH_FILE);
   }
-  // 3) link EPERM → copyFile 回退。锚定为干净 link 段(仅捕获 EEXIST)。
-  //    官方 0.1.2-alpha.2 打包产物把 sha256 函数重命名为 digest$1（rc.2 名为 digest），
-  //    故用正则同时适配两种命名，捕获的函数名在替换块中原样沿用。
-  const linkRe = /\t\t\tawait link\(temporary, target\);\n\t\t\} catch \(error\) \{\n\t\t\t\/\* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race\. \*\/\n\t\t\tif \(!\(error instanceof Error && "code" in error && error\.code === "EEXIST"\)\) throw error;\n\t\t\tif \((digest(?:\$1)?)\(new Uint8Array\(await readFile\(target\)\)\) !== sha256\) throw new AttachmentError\("Stored attachment failed integrity verification\.", "ATTACHMENT_CORRUPT"\);\n\t\t\}/;
-  const linkM = linkRe.exec(patched);
-  if (linkM) {
-    const dg = linkM[1];
-    patched = patched.slice(0, linkM.index) +
-      '\t\t\tawait link(temporary, target);\n' +
-      '\t\t} catch (error) {\n' +
-      '\t\t\t/* HarmonyOS patch: 不支持硬链接的存储(如 Android/HarmonyOS)对 link() 报 EPERM，改按 copy 发布。 */\n' +
-      '\t\t\tif (!(error instanceof Error && "code" in error)) throw error;\n' +
-      '\t\t\tif (error.code === "EPERM") {\n' +
-      '\t\t\t\ttry {\n' +
-      '\t\t\t\t\tawait copyFile(temporary, target, constants.COPYFILE_EXCL);\n' +
-      '\t\t\t\t} catch (copyError) {\n' +
-      '\t\t\t\t\t/* v8 ignore next -- copy 发布竞态与 link 相同：EEXIST 即视为已发布。 */\n' +
-      '\t\t\t\t\tif (!(copyError instanceof Error && "code" in copyError && copyError.code === "EEXIST")) throw copyError;\n' +
-      `\t\t\t\t\tif (${dg}(new Uint8Array(await readFile(target))) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");\n` +
-      '\t\t\t\t}\n' +
-      '\t\t\t} else if (error.code === "EEXIST") {\n' +
-      `\t\t\t\tif (${dg}(new Uint8Array(await readFile(target))) !== sha256) throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");\n` +
-      '\t\t\t} else {\n' +
-      '\t\t\t\tthrow error;\n' +
-      '\t\t\t}\n' +
-      '\t\t}' +
-      patched.slice(linkM.index + linkM[0].length);
-  } else if (!patched.includes('await copyFile(temporary, target, constants.COPYFILE_EXCL)')) {
+  // 3) link EPERM → copyFile 回退。
+  //    0.1.3-alpha.2 把附件发布重构成 staged 写盘：publishStagedObject / publishImmutableAlias
+  //    两处 link 段结构一致，仅源与摘要引用不同(staged.path/source、staged.sha256/sha256)，
+  //    统一以 digestFile(target) 校验已存在对象。旧版(≤0.1.2-rc.1)是单处
+  //    link(temporary, target) + digest$1/digest(new Uint8Array(await readFile(target))) 校验，
+  //    两种形状都要能打，保证升级与回滚都能自动重打。
+  const epermCatch = (src, digest) =>
+    '\t\t} catch (error) {\n' +
+    '\t\t\t/* HarmonyOS patch: 不支持硬链接的存储(如 Android/HarmonyOS)对 link() 报 EPERM(目标不存在也报)，改按 copy 发布。 */\n' +
+    '\t\t\tif (!(error instanceof Error && "code" in error)) throw error;\n' +
+    '\t\t\tif (error.code === "EPERM") {\n' +
+    '\t\t\t\ttry {\n' +
+    '\t\t\t\t\tawait copyFile(' + src + ', target, constants.COPYFILE_EXCL);\n' +
+    '\t\t\t\t} catch (copyError) {\n' +
+    '\t\t\t\t\t/* v8 ignore next -- copy 发布竞态与 link 相同：EEXIST 即视为已发布。 */\n' +
+    '\t\t\t\t\tif (!(copyError instanceof Error && "code" in copyError && copyError.code === "EEXIST")) throw copyError;\n' +
+    '\t\t\t\t\tif (await digestFile(target) !== ' + digest + ') throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");\n' +
+    '\t\t\t\t}\n' +
+    '\t\t\t} else if (error.code === "EEXIST") {\n' +
+    '\t\t\t\tif (await digestFile(target) !== ' + digest + ') throw new AttachmentError("Stored attachment failed integrity verification.", "ATTACHMENT_CORRUPT");\n' +
+    '\t\t\t} else {\n' +
+    '\t\t\t\tthrow error;\n' +
+    '\t\t\t}\n' +
+    '\t\t}';
+  // 新形状(0.1.3-alpha.2+)：link(staged.path|source, target) + digestFile 校验。
+  const newLinkRe = /\t\t\tawait link\(([^)]+), target\);\n\t\t\} catch \(error\) \{\n\t\t\t\/\* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race\. \*\/\n\t\t\tif \(!\(error instanceof Error && "code" in error && error\.code === "EEXIST"\)\) throw error;\n\t\t\tif \(await digestFile\(target\) !== ([^)]+)\) throw new AttachmentError\("Stored attachment failed integrity verification\.", "ATTACHMENT_CORRUPT"\);\n\t\t\}/g;
+  let hadNewShape = false;
+  patched = patched.replace(newLinkRe, (_all, src, digest) => {
+    hadNewShape = true;
+    return '\t\t\tawait link(' + src + ', target);\n' + epermCatch(src, digest);
+  });
+  // 旧形状(≤0.1.2-rc.1)：link(temporary, target) + digest$1/digest 内联校验。
+  const legacyLinkRe = /\t\t\tawait link\(temporary, target\);\n\t\t\} catch \(error\) \{\n\t\t\t\/\* v8 ignore next -- Private same-filesystem directories make EEXIST the only recoverable link race\. \*\/\n\t\t\tif \(!\(error instanceof Error && "code" in error && error\.code === "EEXIST"\)\) throw error;\n\t\t\tif \((digest(?:\$1)?)\(new Uint8Array\(await readFile\(target\)\)\) !== sha256\) throw new AttachmentError\("Stored attachment failed integrity verification\.", "ATTACHMENT_CORRUPT"\);\n\t\t\}/;
+  const legacyM = legacyLinkRe.exec(patched);
+  if (legacyM) {
+    const dg = legacyM[1];
+    patched = patched.slice(0, legacyM.index) +
+      '\t\t\tawait link(temporary, target);\n' + epermCatch('temporary', 'sha256').replace(/await digestFile\(target\) !== sha256\)/g, dg + '(new Uint8Array(await readFile(target))) !== sha256)') +
+      patched.slice(legacyM.index + legacyM[0].length);
+  }
+  if (!hadNewShape && !legacyM && !patched.includes('await copyFile(')) {
     throw new Error('attachment 补丁锚点缺失(link 段)，需手动处理: ' + ATTACH_FILE);
   }
   writeFileSync(ATTACH_FILE, patched);
@@ -454,16 +483,106 @@ function patchLoopbackAuth() {
   writeFileSync(CONN_FILE, patched);
   return { changed: true };
 }
+function patchImportMetaMain() {
+  const edits = [
+    {
+      file: BIN_FILE,
+      importAnchor: 'import { fileURLToPath } from "node:url";',
+      importReplacement: 'import { fileURLToPath, pathToFileURL } from "node:url";\nimport { resolve } from "node:path";',
+      runAnchor: 'if (import.meta.main) await runCli();',
+      block: '/* HarmonyOS patch: node v22.7.0 无 import.meta.main(官方基线 ≥22.18)，入口静默退出；改回 argv[1]+metaUrl 等价判等。 */\nfunction isMainEntry(argv1, metaUrl) {\n\tif (typeof argv1 !== "string") return false;\n\ttry { return pathToFileURL(resolve(argv1)).href === metaUrl; } catch { return false; }\n}\nif (isMainEntry(process.argv[1], import.meta.url)) await runCli();'
+    },
+    {
+      file: RUNNER_FILE,
+      importAnchor: 'import { closeSync } from "node:fs";',
+      importReplacement: 'import { closeSync } from "node:fs";\nimport { pathToFileURL } from "node:url";\nimport { resolve } from "node:path";',
+      runAnchor: 'if (import.meta.main) {',
+      block: '/* HarmonyOS patch: node v22.7.0 无 import.meta.main(官方基线 ≥22.18)，子进程 runner 入口需等价判等。 */\nfunction isMainEntry(argv1, metaUrl) {\n\tif (typeof argv1 !== "string") return false;\n\ttry { return pathToFileURL(resolve(argv1)).href === metaUrl; } catch { return false; }\n}\nif (isMainEntry(process.argv[1], import.meta.url)) {'
+    }
+  ];
+  let changedCount = 0;
+  for (const e of edits) {
+    const txt = readFileSafe(e.file);
+    if (!txt) throw new Error('入口文件不存在，需手动处理: ' + e.file);
+    if (txt.includes(MARK)) continue;
+    let next = txt;
+    if (e.importAnchor && next.includes(e.importAnchor)) next = next.split(e.importAnchor).join(e.importReplacement);
+    if (!next.includes(e.runAnchor)) throw new Error('入口判等锚点缺失(import.meta.main)，需手动处理: ' + e.file);
+    next = next.split(e.runAnchor).join(e.block);
+    writeFileSync(e.file, next);
+    changedCount += 1;
+  }
+  return { changed: changedCount > 0 };
+}
+// 把仓库权威 compat-loader 同步进 dsh-test（ESM polyfill + CJS worker 孪生）。
+function syncCompatLoaders() {
+  let changed = 0;
+  for (const [repo, target] of [[LOADER_MJS, DSH_LOADER_MJS], [LOADER_CJS, DSH_LOADER_CJS]]) {
+    const src = readFileSafe(repo);
+    if (!src) throw new Error('仓库 compat-loader 缺失，需手动处理: ' + repo);
+    if (readFileSafe(target) !== src) { writeFileSync(target, src); changed += 1; }
+  }
+  return { changed: changed > 0 };
+}
+// worker.cjs(CJS)require("node:zlib") 不受 ESM loader hook 管辖，node v22.7 缺 zstd 导出。
+// 改指到 CJS 孪生 shim(compat-loader-cjs.cjs)，由它补齐 node-24 zstd API。
+function patchWorkerZlib() {
+  const txt = readFileSafe(WORKER_CJS_FILE);
+  if (!txt) throw new Error('worker.cjs 不存在，需手动处理: ' + WORKER_CJS_FILE);
+  if (txt.includes('compat-loader-cjs.cjs')) return { changed: false };
+  const anchor = 'let node_zlib = require("node:zlib");';
+  if (!txt.includes(anchor)) throw new Error('worker.cjs 补丁锚点缺失(node:zlib require)，需手动处理: ' + WORKER_CJS_FILE);
+  const replacement = '/* HarmonyOS patch: node v22.7.0 无 node:zlib 的 zstd 导出(官方基线 ≥22.18)，改指 CJS 孪生 shim。 */\nlet node_zlib = require(' + JSON.stringify(DSH_LOADER_CJS) + ');';
+  writeFileSync(WORKER_CJS_FILE, txt.split(anchor).join(replacement));
+  return { changed: true };
+}
+// 0.1.3-alpha.2 迁移校验默认起 worker_threads(worker.cjs)，该 worker 用 CJS require 拉 ESM
+// @deepseek-ai 包(官方基线 node ≥22.18 才支持 require(esm))；鸿蒙 node v22.7.0 起不来。
+// 改回主线程 verifyCurrentGeneration(同一模块、fzstd 同步解码可用)，代价仅是迁移校验不隔离线程。
+function patchSessionVerify() {
+  const txt = readFileSafe(SESS_FILE);
+  if (!txt) throw new Error('session-persistence 文件不存在，需手动处理: ' + SESS_FILE);
+  const anchor = 'verifyCurrentFile: verifyCurrentGenerationInWorker,';
+  if (!txt.includes(anchor)) return { changed: false };
+  const replacement = 'verifyCurrentFile: (path, compression, expectedId, expectedEventCount, expectedPrefix) => verifyCurrentGeneration(path, compression, expectedId, expectedEventCount, internals.fs, expectedPrefix), /* HarmonyOS patch: node v22.7 worker 无法 require(esm)，迁移校验改回主线程 */';
+  writeFileSync(SESS_FILE, txt.split(anchor).join(replacement));
+  return { changed: true };
+}
+// 0.1.3-alpha.2 官方把 released-v0 会话冻结为只读校验：插件 source.form 仅收 instructions/catalog/
+// snapshot/notice/relay/recall，subagent/descriptor 仅收 version 3。本机升级前的旧会话由
+// prompt-antivirus / huawei-devdocs 写入过 form:"guard"，deepseek-harness 开发期(2026-08)写入过
+// descriptor v2，导致 v0→v1 迁移整段拒绝、历史会话全部无法加载。这里只放行这两类历史遗留数据，
+// 其余仍按上游封闭清单校验。上游重装/升级会被冲掉，故纳入 patchAll 幂等重打。
+function patchSessionFormat() {
+  const txt = readFileSafe(SESSION_FORMAT_FILE);
+  if (!txt) throw new Error('session-format-v0-to-v1 文件不存在，需手动处理: ' + SESSION_FORMAT_FILE);
+  if (txt.includes('HarmonyOS patch: 本机 prompt-antivirus/huawei-devdocs')) return { changed: false };
+  const formOld = 'literalValue(form, [\n\t\t"instructions",\n\t\t"catalog",\n\t\t"snapshot",\n\t\t"notice",\n\t\t"relay",\n\t\t"recall"\n\t], `${label} form`);';
+  const formNew = '/* HarmonyOS patch: 本机 prompt-antivirus/huawei-devdocs 曾写 source.form:"guard"（非 released v0 表单），\n\t0.1.3-alpha.2 引入冻结 v0→v1 校验后旧会话历史整体拒绝加载；仅放行该历史遗留表单，其余仍按封闭清单校验。 */\n\tliteralValue(form, [\n\t\t"instructions",\n\t\t"catalog",\n\t\t"snapshot",\n\t\t"notice",\n\t\t"relay",\n\t\t"recall",\n\t\t"guard"\n\t], `${label} form`);';
+  const descOld = 'if (event.type === "subagent/descriptor" && data["version"] !== 3) {\n\t\tconst descriptorVersion = sessionFormatCount(data["version"], `${event.type} ${event.seq} version`);\n\t\tif (version === 0) throw new SessionFormatUnsupportedMigrationError(`${event.type} ${event.seq} uses unsupported descriptor version ${descriptorVersion}`);\n\t\treturn;\n\t}';
+  const descNew = 'if (event.type === "subagent/descriptor" && data["version"] !== 3) {\n\t\tconst descriptorVersion = sessionFormatCount(data["version"], `${event.type} ${event.seq} version`);\n\t\t/* HarmonyOS patch: deepseek-harness 开发期(2026-08)会话含 descriptor version 2，released v0 只认 3；\n\t\t0.1.3-alpha.2 冻结校验后这类旧会话被整段拒绝，仅放行 version 2 遗留数据继续走形状校验。 */\n\t\tif (version === 0 && descriptorVersion === 2) return;\n\t\tif (version === 0) throw new SessionFormatUnsupportedMigrationError(`${event.type} ${event.seq} uses unsupported descriptor version ${descriptorVersion}`);\n\t\treturn;\n\t}';
+  const descShapeOld = 'function subagentDescriptorValue(data, label) {\n\tliteralValue(data["version"], [3], `${label} version`);';
+  const descShapeNew = 'function subagentDescriptorValue(data, label) {\n\t/* HarmonyOS patch: 兼容遗留 descriptor version 2（同 descOld，仅历史读取场景会出现）。 */\n\tliteralValue(data["version"], [3, 2], `${label} version`);';
+  let next = txt;
+  for (const [oldText, newText, what] of [[formOld, formNew, '插件 source.form 白名单'], [descOld, descNew, 'descriptor v2 门控'], [descShapeOld, descShapeNew, 'descriptor 形状版本清单']]) {
+    const count = next.split(oldText).length - 1;
+    if (count !== 1) throw new Error('session-format-v0-to-v1 补丁锚点缺失(' + what + ')，需手动处理: ' + SESSION_FORMAT_FILE);
+    next = next.replace(oldText, newText);
+  }
+  writeFileSync(SESSION_FORMAT_FILE, next);
+  return { changed: true };
+}
 function patchAll() {
+  const l = syncCompatLoaders();
   const r1 = patchCredentials(), r2 = patchSession(), r3 = patchPermission(), r4 = patchAttachment(), r5 = patchVision();
-  const r6 = patchCordisLoader(), r7 = patchSettingsCompat(), r8 = patchLoopbackAuth(), r9 = patchFsLocal();
-  for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE]) {
+  const r6 = patchCordisLoader(), r7 = patchSettingsCompat(), r8 = patchLoopbackAuth(), r9 = patchFsLocal(), r10 = patchImportMetaMain(), r11 = patchWorkerZlib(), r12 = patchSessionVerify(), r13 = patchSessionFormat();
+  for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE]) {
     if (!readFileSafe(f).includes(MARK)) throw new Error('补丁校验失败(标记缺失): ' + f);
   }
   if (!readFileSafe(FS_LOCAL_FILE).includes('HarmonyOS /storage mounts reject hard links')) {
     throw new Error('补丁校验失败(标记缺失): ' + FS_LOCAL_FILE);
   }
-  return { credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed };
+  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed };
 }
 
 // compat-loader.mjs（node v22 鸿蒙运行时 polyfill）依赖的纯 JS 包。重装核心包时它们不在依赖树里
@@ -572,7 +691,7 @@ export async function install() {
   log('安装完成 → ' + target);
   writeFileSync(PREV, before);
   const p = patchAll();
-  log('补丁: credential=' + (p.credential ? '重打' : '已存在') + ', session=' + (p.session ? '重打' : '已存在') + ', permission=' + (p.permission ? '重打' : '已存在') + ', attachment=' + (p.attachment ? '重打' : '已存在') + ', vision=' + (p.vision ? '重打' : '已存在') + ', cordisLoader=' + (p.cordisLoader ? '重打' : '已存在') + ', settingsCompat=' + (p.settingsCompat ? '重打' : '已存在') + ', loopbackAuth=' + (p.loopbackAuth ? '重打' : '已存在') + ', fsLocal=' + (p.fsLocal ? '重打' : '已存在'));
+  log('补丁: credential=' + (p.credential ? '重打' : '已存在') + ', session=' + (p.session ? '重打' : '已存在') + ', permission=' + (p.permission ? '重打' : '已存在') + ', attachment=' + (p.attachment ? '重打' : '已存在') + ', vision=' + (p.vision ? '重打' : '已存在') + ', cordisLoader=' + (p.cordisLoader ? '重打' : '已存在') + ', settingsCompat=' + (p.settingsCompat ? '重打' : '已存在') + ', loopbackAuth=' + (p.loopbackAuth ? '重打' : '已存在') + ', fsLocal=' + (p.fsLocal ? '重打' : '已存在') + ', importMetaMain=' + (p.importMetaMain ? '重打' : '已存在') + ', workerZlib=' + (p.workerZlib ? '重打' : '已存在') + ', sessionVerify=' + (p.sessionVerify ? '重打' : '已存在') + ', sessionFormat=' + (p.sessionFormat ? '重打' : '已存在'));
   const killed = stopDsh();
   if (killed > 0) log('已停旧 dsh 进程 ' + killed + ' 个');
   restartDsh();
