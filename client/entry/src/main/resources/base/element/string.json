@@ -15,6 +15,10 @@
     {
       "name": "internet_permission_reason",
       "value": "用于连接本机或局域网内的 dsh 服务，收发对话消息"
+    },
+    {
+      "name": "use_ai_permission_reason",
+      "value": "用于调用本机本地 AI 模型（端侧模型管理）进行对话推理"
     }
   ]
 }

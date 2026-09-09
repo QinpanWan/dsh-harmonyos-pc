@@ -43,6 +43,16 @@
           ],
           "when": "inuse"
         }
+      },
+      {
+        "name": "ohos.permission.USE_AI",
+        "reason": "$string:use_ai_permission_reason",
+        "usedScene": {
+          "abilities": [
+            "EntryAbility"
+          ],
+          "when": "inuse"
+        }
       }
     ]
   }
