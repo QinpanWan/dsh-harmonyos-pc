@@ -369,7 +369,10 @@ node scripts/dsh-update.mjs patch
 
 - 左侧栏：品牌区、新建会话、会话列表（运行指示、选中高亮）、连接状态 + 设置入口
 - 聊天主区：顶部栏（会话标题 / 停止生成）、消息列表（用户气泡、助手富文本、代码块、工具卡片、流式光标）、底部输入栏（回车发送）
-- 设置面板（bindSheet 半模态）：配置 dsh 服务地址（默认 `http://127.0.0.1:3080`），持久化到 preferences
+- 设置面板（bindSheet 半模态）：配置连接模式、dsh 服务地址（默认 `http://127.0.0.1:3080`）、预设与服务端模型 Provider，持久化到 preferences
+- 连接双模式：**内置直连**（`direct`，默认——填 DeepSeek API Key 即用）与 **dsh 服务**（`dsh`——对接本机/局域网 dsh）
+- 沉浸光感玻璃主题：半透明玻璃面层 + 细光边 + 品牌蓝渐变（侧栏活动项 / 主按钮 / 助手气泡）
+- 端侧本地 AI（可选）：`module.json5` 已声明 `ohos.permission.USE_AI`，签名与白名单路径见 `docs/LOCAL-AI-USE_AI.md`
 
 ### 通信（与 dsh 官方 Web 前端同协议）
 
@@ -445,6 +448,12 @@ MIT License，见 [LICENSE](LICENSE)。
 ---
 
 ## 更新记录
+
+### 2026-09-09 — 客户端沉浸光感/端侧本地 AI + huawei 系插件随仓库分发
+
+- **`plugins/dsh-huawei-devdocs`、`plugins/dsh-huawei-local-llm` 随仓库分发**：源码与运行实例 `plugins-src` 逐字节一致（含 `(_args, value)` 渲染签名修复、守卫消息去 `form:"guard"`、MIT LICENSE 与测试夹具）；`dsh-hm-update.mjs` 自动部署 `plugins/` 下的 profile 级插件，无需单独安装。
+- **鸿蒙客户端接入端侧本地 AI**：`module.json5` 声明 `ohos.permission.USE_AI`（system_basic）并新增权限理由文案；签名与白名单的三种路径见 `docs/LOCAL-AI-USE_AI.md`。
+- **客户端 UI 沉浸光感版**：主题令牌新增玻璃面层/细光边/品牌渐变；设置面板改 `bindSheet` 半模态（MEDIUM/LARGE detents + 毛玻璃 + 拖条），侧栏/聊天/输入/消息同步玻璃化。
 
 ### 2026-09-09 — 跟进官方 0.1.3-alpha.2（历史会话迁移兼容 + loader 分帧压缩）
 

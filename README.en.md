@@ -362,6 +362,12 @@ This project does not include dsh source code; it only contains independently wr
 
 ## Changelog
 
+### 2026-09-09 — Client glass theme / on-device local AI + Huawei plugins shipped in-repo
+
+- **`plugins/dsh-huawei-devdocs` and `plugins/dsh-huawei-local-llm` are now shipped in-repo**, byte-identical to the running `plugins-src` copies (incl. the `(_args, value)` render-signature fix, guard messages without `form:"guard"`, MIT LICENSE and test fixtures). `dsh-hm-update.mjs` auto-deploys every profile-level plugin under `plugins/`, so no separate install step is needed.
+- **The HarmonyOS client now declares `ohos.permission.USE_AI`** (system_basic) with a permission-reason string; the signing / whitelist paths are documented in `docs/LOCAL-AI-USE_AI.md`.
+- **Client UI "immersive glass" pass**: glass layers, light borders and a brand gradient were added to the theme tokens; the settings panel moved to a `bindSheet` half-modal (MEDIUM/LARGE detents + blur + drag bar), and the sidebar / chat / input / message views were glassified.
+
 ### 2026-09-09 — Follow official 0.1.3-alpha.2 (legacy-session migration compat + loader frame-split compression)
 
 dsh upgraded to official `0.1.3-alpha.2` (released 2026-09-08; local dsh-test upgraded). The official release freezes released-v0 sessions to read-only validation and adds v0→v2 generation migration; the frozen checks are too strict for dev-era logs, so every session history failed to load after the upgrade ("model cannot load"):
