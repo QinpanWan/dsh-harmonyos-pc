@@ -544,7 +544,7 @@ function patchSessionVerify() {
   if (!txt) throw new Error('session-persistence 文件不存在，需手动处理: ' + SESS_FILE);
   const anchor = 'verifyCurrentFile: verifyCurrentGenerationInWorker,';
   if (!txt.includes(anchor)) return { changed: false };
-  const replacement = 'verifyCurrentFile: (path, compression, expectedId, expectedEventCount, expectedPrefix) => verifyCurrentGeneration(path, compression, expectedId, expectedEventCount, internals.fs, expectedPrefix), /* HarmonyOS patch: node v22.7 worker 无法 require(esm)，迁移校验改回主线程 */';
+  const replacement = 'verifyCurrentFile: (path, compression, expectedId, expectedEventCount, expectedPrefix) => defaultGenerationRuntime.verify(path, compression, expectedId, expectedEventCount, expectedPrefix), /* HarmonyOS patch: node v22.7 worker 无法 require(esm)，迁移校验改回主线程(引用模块级 runtime，避免作用域外 internals) */';
   writeFileSync(SESS_FILE, txt.split(anchor).join(replacement));
   return { changed: true };
 }
@@ -572,17 +572,34 @@ function patchSessionFormat() {
   writeFileSync(SESSION_FORMAT_FILE, next);
   return { changed: true };
 }
+
+// /storage 挂载对硬链接一律 EPERM(即使目标不存在)：0.1.3-alpha.2 的历史会话按需迁移发布
+// 用 fs.link(staged, currentPath) 生成 .v2 世代，鸿蒙上每次 resume 都 EPERM 失败(web ui 无法发消息)。
+// 参照 dsh-fs-local 既有兜底：link 失败且确认目标缺失时改 rename 原子发布。重装/升级会被冲掉，
+// 故纳入 patchAll 幂等重打。
+function patchMigrationPublish() {
+  const txt = readFileSafe(SESS_FILE);
+  if (!txt) throw new Error('session-persistence 文件不存在，需手动处理: ' + SESS_FILE);
+  if (txt.includes('HarmonyOS patch: /storage 挂载对硬链接一律 EPERM')) return { changed: false };
+  const anchor = '\ttry {\n\t\tawait internals.fs.link(staged, currentPath);\n\t} catch (error) {\n\t\t/* v8 ignore else -- a non-collision filesystem error propagates unchanged. */\n\t\tif (isEEXIST(error)) return false;\n\t\t/* v8 ignore next -- the filesystem error is already complete. */\n\t\tthrow error;\n\t}\n\tawait syncDirectory(dirname(currentPath), internals);\n\treturn true;';
+  const replacement = '\ttry {\n\t\tawait internals.fs.link(staged, currentPath);\n\t} catch (error) {\n\t\t/* v8 ignore else -- a non-collision filesystem error propagates unchanged. */\n\t\tif (isEEXIST(error)) return false;\n\t\t/* HarmonyOS patch: /storage 挂载对硬链接一律 EPERM(即使目标不存在)；link 失败且确认目标缺失时\n\t\t   改 rename 原子发布(同目录改名，语义等价)，参照 dsh-fs-local 既有 create-if-absent 兜底。 */\n\t\tlet targetExists = false;\n\t\ttry {\n\t\t\tawait internals.fs.lstat(currentPath);\n\t\t\ttargetExists = true;\n\t\t} catch (statError) {\n\t\t\tif (statError?.code !== "ENOENT" && statError?.code !== "ENOTDIR") throw statError;\n\t\t}\n\t\tif (!targetExists) {\n\t\t\ttry {\n\t\t\t\tawait rename(staged, currentPath);\n\t\t\t\tawait syncDirectory(dirname(currentPath), internals);\n\t\t\t\treturn true;\n\t\t\t} catch (renameError) {\n\t\t\t\tif (isEEXIST(renameError)) return false;\n\t\t\t\tthrow renameError;\n\t\t\t}\n\t\t}\n\t\t/* v8 ignore next -- the filesystem error is already complete. */\n\t\tthrow error;\n\t}\n\tawait syncDirectory(dirname(currentPath), internals);\n\treturn true;';
+  const count = txt.split(anchor).length - 1;
+  if (count !== 1) throw new Error('session-persistence 发布补丁锚点缺失/重复(count=' + count + ')，需手动处理: ' + SESS_FILE);
+  writeFileSync(SESS_FILE, txt.replace(anchor, replacement));
+  return { changed: true };
+}
+
 function patchAll() {
   const l = syncCompatLoaders();
   const r1 = patchCredentials(), r2 = patchSession(), r3 = patchPermission(), r4 = patchAttachment(), r5 = patchVision();
-  const r6 = patchCordisLoader(), r7 = patchSettingsCompat(), r8 = patchLoopbackAuth(), r9 = patchFsLocal(), r10 = patchImportMetaMain(), r11 = patchWorkerZlib(), r12 = patchSessionVerify(), r13 = patchSessionFormat();
+  const r6 = patchCordisLoader(), r7 = patchSettingsCompat(), r8 = patchLoopbackAuth(), r9 = patchFsLocal(), r10 = patchImportMetaMain(), r11 = patchWorkerZlib(), r12 = patchSessionVerify(), r13 = patchSessionFormat(), r14 = patchMigrationPublish();
   for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE]) {
     if (!readFileSafe(f).includes(MARK)) throw new Error('补丁校验失败(标记缺失): ' + f);
   }
   if (!readFileSafe(FS_LOCAL_FILE).includes('HarmonyOS /storage mounts reject hard links')) {
     throw new Error('补丁校验失败(标记缺失): ' + FS_LOCAL_FILE);
   }
-  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed };
+  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed };
 }
 
 // compat-loader.mjs（node v22 鸿蒙运行时 polyfill）依赖的纯 JS 包。重装核心包时它们不在依赖树里

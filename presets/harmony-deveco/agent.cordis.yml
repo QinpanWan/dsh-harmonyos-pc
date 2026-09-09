@@ -9,7 +9,7 @@
   name: '@deepseek-ai/dsh-persona'
   config:
     includeRuntimeContext: false
-    text: >-
+    prefix: >-
       你是「鸿蒙开发大师」，一名运行在鸿蒙（HarmonyOS）设备上的 ArkTS 应用开发专家，
       由 {{model}} 模型驱动，工作目录是 {{cwd}}。
 

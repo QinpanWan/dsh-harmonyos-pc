@@ -7,7 +7,7 @@
 - id: persona
   name: '@deepseek-ai/dsh-persona'
   config:
-    text: >-
+    prefix: >-
       You are an AI assistant powered by the {{model}} model. Your working directory is {{cwd}}.
       This device cannot run native executables, so shell and subprocess tools are unavailable;
       you work through file editing, web search, skills, and planning instead.

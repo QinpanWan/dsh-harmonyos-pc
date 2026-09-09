@@ -82,3 +82,9 @@
   disabled: true
 - id: ui-open-in-app
   disabled: true
+
+# dsh-pet 0.2.6 顶部 import electron 原生绑定(@electron/get/@electron-internal/extract-zip)，
+# 鸿蒙 dlopen 失败(EACCES)且无 linux-arm64-musl prebuild → 冷启动插件树加载即崩(watchdog 重启循环)。
+# 禁用该行待上游纯 JS 适配；09-06 在跑的 0.2.0 版可正常加载。
+- id: pet
+  disabled: true

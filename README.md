@@ -449,6 +449,16 @@ MIT License，见 [LICENSE](LICENSE)。
 
 ## 更新记录
 
+### 2026-09-09 — 修复 0.1.3-alpha.2 升级后「web 无法向会话发消息」（resume 链 4 处回归）
+
+升级后打开/续聊既有会话都会在 resume 中途失败，表现为 web UI 发送消息无效。逐层定位并修复：
+
+- **`patchSessionVerify()` 作用域 bug（致命）**：补丁插入的 `verifyCurrentFile` 回调引用作用域外的 `internals`，任意 v0 会话 resume 即抛 `ReferenceError: internals is not defined`；改为引用模块级 `defaultGenerationRuntime.verify`。
+- **迁移发布硬链接 EPERM（致命）**：v0→v2 世代按需发布用 `fs.link()`，鸿蒙 `/storage` 挂载禁止硬链接（目标缺失也 EPERM）；新增 `patchMigrationPublish()` 幂等补丁，link 失败且确认目标缺失时改 `rename` 原子发布（与 `dsh-fs-local` 既有兜底一致）。
+- **`dsh-pet` 0.2.6 冷启动崩溃**：host 入口顶层 import `@electron/get`/`@electron-internal/extract-zip` 原生绑定，鸿蒙 dlopen 失败且无 musl prebuild → 插件树加载崩溃（watchdog 重启循环）；`harmony.patch.yml` 禁用 `pet` 行（0.2.0 旧版可正常加载，上游纯 JS 化后可再启用）。
+- **agent-presets persona 键位迁移**：0.1.3-alpha.2 的 `dsh-persona` 把配置键 `text` 改为必填 `prefix`；全部 preset（harmony-chat/deveco/liangshen 等）按旧键编写导致 preset mount 失败，统一迁移为 `prefix`。
+
+
 ### 2026-09-09 — 客户端沉浸光感/端侧本地 AI + huawei 系插件随仓库分发
 
 - **`plugins/dsh-huawei-devdocs`、`plugins/dsh-huawei-local-llm` 随仓库分发**：源码与运行实例 `plugins-src` 逐字节一致（含 `(_args, value)` 渲染签名修复、守卫消息去 `form:"guard"`、MIT LICENSE 与测试夹具）；`dsh-hm-update.mjs` 自动部署 `plugins/` 下的 profile 级插件，无需单独安装。

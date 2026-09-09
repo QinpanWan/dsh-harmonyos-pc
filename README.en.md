@@ -362,6 +362,16 @@ This project does not include dsh source code; it only contains independently wr
 
 ## Changelog
 
+### 2026-09-09 — Fix "web UI cannot message sessions" after 0.1.3-alpha.2 (4 resume-chain regressions)
+
+Resuming any pre-upgrade session failed mid-resume, so sending from the web UI appeared broken. Root causes, each fixed:
+
+- **`patchSessionVerify()` scope bug (fatal)**: the inserted `verifyCurrentFile` callback referenced an out-of-scope `internals`, so every v0 resume threw `ReferenceError: internals is not defined`; it now delegates to the module-level `defaultGenerationRuntime.verify`.
+- **Migration publish hard-link EPERM (fatal)**: v0→v2 on-demand publication used `fs.link()`, which HarmonyOS `/storage` rejects with EPERM even for absent targets; new idempotent `patchMigrationPublish()` falls back to `rename` after confirming the target is absent (same pattern as the existing `dsh-fs-local` workaround).
+- **`dsh-pet` 0.2.6 cold-boot crash**: host entry imports `@electron/get`/`@electron-internal/extract-zip` native bindings at top level (dlopen fails on HarmonyOS, no musl prebuild), crashing plugin-tree load into a watchdog restart loop; `harmony.patch.yml` now disables the `pet` row (0.2.0 loaded fine; re-enable once upstream is pure JS).
+- **agent-presets persona key migration**: `dsh-persona` in 0.1.3-alpha.2 requires `prefix` instead of the old `text` key; all presets (harmony-chat/deveco/liangshen etc.) were migrated to `prefix`.
+
+
 ### 2026-09-09 — Client glass theme / on-device local AI + Huawei plugins shipped in-repo
 
 - **`plugins/dsh-huawei-devdocs` and `plugins/dsh-huawei-local-llm` are now shipped in-repo**, byte-identical to the running `plugins-src` copies (incl. the `(_args, value)` render-signature fix, guard messages without `form:"guard"`, MIT LICENSE and test fixtures). `dsh-hm-update.mjs` auto-deploys every profile-level plugin under `plugins/`, so no separate install step is needed.
