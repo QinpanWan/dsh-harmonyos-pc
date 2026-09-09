@@ -1,0 +1,24 @@
+{
+  "name": "dsh-huawei-local-llm",
+  "version": "0.1.0",
+  "description": "华为/鸿蒙 PC 官方本地大模型接入插件：注册 huawei-local LLM provider，并提供 huawei_local_llm / huawei_local_models 工具，直连 127.0.0.1:11434 (Ollama / OpenAI 兼容接口)。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-atomic-write": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.0-rc.6",
+    "@earendil-works/pi-ai": "^0.84.4"
+  },
+  "dependencies": {
+    "js-yaml": "^4.2.0"
+  }
+}
