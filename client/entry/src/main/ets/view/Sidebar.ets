@@ -1,5 +1,6 @@
 /**
  * Sidebar：左侧栏（品牌区 + 新建会话 + 会话列表 + 连接状态/设置入口）。
+ * 沉浸光感：半透明玻璃面层 + 品牌渐变活动项 + 玻璃会话卡片。
  * 参照华为开发者文档《自定义组件》：@Link 与父组件 @State 双向同步，
  * @Prop 单向同步，普通函数属性作为事件回调（事件上抛）。
  */
@@ -25,6 +26,7 @@ export struct Sidebar {
           .width(34)
           .height(34)
           .borderRadius(9)
+          .opacity(0.96)
         Column({ space: 2 }) {
           Text('DeepSeek Harness')
             .fontSize(15)
@@ -40,15 +42,19 @@ export struct Sidebar {
       .width('100%')
       .padding({ left: 16, right: 16, top: 14, bottom: 14 })
 
-      // 新建会话
+      // 新建会话（品牌渐变玻璃）
       Button('＋ 新建会话')
         .width('calc(100% - 32vp)')
         .height(38)
         .fontSize(14)
         .fontColor(Color.White)
-        .backgroundColor(Theme.COLOR_PRIMARY)
-        .borderRadius(10)
+        .linearGradient({
+          angle: 135,
+          colors: [[Theme.BRAND_GRAD_START, 0], [Theme.BRAND_GRAD_END, 1]],
+        })
+        .borderRadius(11)
         .margin({ left: 16, right: 16, bottom: 10 })
+        .shadow({ radius: 8, color: 'rgba(61,86,224,0.28)', offsetY: 2 })
         .onClick(() => {
           this.onNew();
         })
@@ -86,7 +92,8 @@ export struct Sidebar {
             .width('100%')
             .padding({ left: 12, right: 12, top: 10, bottom: 10 })
             .borderRadius(10)
-            .backgroundColor(Theme.COLOR_SURFACE_HOVER)
+            .backgroundColor(Theme.GLASS_SIDEBAR)
+            .border({ width: 1, color: Theme.GLASS_BORDER })
           }
         }
         .width('100%')
@@ -117,20 +124,24 @@ export struct Sidebar {
         Button('设置')
           .height(32)
           .fontSize(13)
-          .backgroundColor(Theme.COLOR_SURFACE)
+          .backgroundColor(Theme.GLASS_INPUT)
           .fontColor(Theme.COLOR_TEXT)
-          .borderRadius(8)
+          .borderRadius(9)
+          .border({ width: 1, color: Theme.GLASS_BORDER })
           .onClick(() => {
             this.onSettings();
           })
       }
       .width('100%')
       .padding(12)
-      .border({ width: { top: 1 }, color: Theme.COLOR_BORDER })
+      .border({ width: { top: 1 }, color: Theme.GLASS_BORDER })
     }
     .width(280)
     .height('100%')
-    .backgroundColor(Theme.COLOR_SIDEBAR)
+    .backgroundColor(Theme.GLASS_SIDEBAR)
+    // 侧栏自身玻璃：模糊透出底层内容，产生沉浸感
+    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+    .border({ width: { right: 1 }, color: Theme.GLASS_BORDER })
   }
 
   @Builder
@@ -166,7 +177,14 @@ export struct Sidebar {
     .width('100%')
     .padding({ left: 12, right: 12, top: 10, bottom: 10 })
     .borderRadius(10)
-    .backgroundColor(item.sessionId === this.currentSessionId ? Theme.COLOR_SURFACE_HOVER : Color.Transparent)
+    // 选中项：品牌渐变玻璃 + 浅色边框；未选中：透明（hover 时淡玻璃）
+    .linearGradient({
+      angle: 135,
+      colors: item.sessionId === this.currentSessionId ?
+        [[Theme.BRAND_GRAD_START, 0], [Theme.BRAND_GRAD_END, 1]] :
+        [[Theme.COLOR_SIDEBAR, 0], [Theme.COLOR_SIDEBAR, 1]],
+    })
+    .border({ width: 1, color: item.sessionId === this.currentSessionId ? Theme.GLASS_BORDER_LIGHT : Theme.GLASS_BORDER })
     .onClick(() => {
       this.onSelect(item.sessionId);
     })

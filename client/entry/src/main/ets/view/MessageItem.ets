@@ -1,5 +1,7 @@
 /**
  * MessageItem：单条消息渲染（用户气泡 / 助手消息 / 工具卡片）。
+ * 沉浸光感：气泡半透明玻璃 + 品牌渐变（用户）/ 左缘品牌条（助手）。
+ * 注意：气泡内不用 backgroundBlurStyle（会发灰），用半透明色 + 细边框实现玻璃感。
  * 参照华为开发者文档《@Observed 和 @ObjectLink》：@ObjectLink 观察
  * @Observed 类实例的属性变化，实现流式输出逐字刷新。
  */
@@ -32,8 +34,12 @@ export struct MessageItem {
         .fontColor(Color.White)
         .lineHeight(22)
         .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-        .backgroundColor(Theme.COLOR_USER_BUBBLE)
+        .linearGradient({
+          angle: 135,
+          colors: [[Theme.BRAND_GRAD_START, 0], [Theme.BRAND_GRAD_END, 1]],
+        })
         .borderRadius({ topLeft: 16, topRight: 16, bottomLeft: 16, bottomRight: 4 })
+        .shadow({ radius: 6, color: 'rgba(61,86,224,0.20)', offsetY: 1 })
         .constraintSize({ maxWidth: '70%' })
     }
     .width('100%')
@@ -47,6 +53,7 @@ export struct MessageItem {
         .width(30)
         .height(30)
         .borderRadius(8)
+        .opacity(0.95)
       Column({ space: 6 }) {
         if (this.message.reasoning.length > 0) {
           Text('思考中…')
@@ -111,9 +118,9 @@ export struct MessageItem {
     }
     .width('100%')
     .padding(10)
-    .backgroundColor(Theme.COLOR_SURFACE)
+    .backgroundColor(Theme.GLASS_INPUT)
     .borderRadius(8)
-    .border({ width: 1, color: Theme.COLOR_BORDER })
+    .border({ width: 1, color: Theme.GLASS_BORDER })
   }
 
   /**

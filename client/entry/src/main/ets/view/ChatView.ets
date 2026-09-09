@@ -1,5 +1,6 @@
 /**
  * ChatView：聊天主区（顶部栏 + 消息列表 + 输入栏）。
+ * 沉浸光感：顶部栏轻玻璃 + 受光细边；消息区透出整体背景。
  * 参照华为开发者文档《列表 (List/ListItem)》：List + ForEach 渲染消息，
  * Scroller 控制滚动到底部。
  */
@@ -21,7 +22,7 @@ export struct ChatView {
 
   build() {
     Column() {
-      // 顶部栏
+      // 顶部栏（轻玻璃 + 底部受光细边）
       Row({ space: 12 }) {
         Text(this.title.length > 0 ? this.title : '新会话')
           .fontSize(16)
@@ -49,8 +50,8 @@ export struct ChatView {
       .width('100%')
       .height(56)
       .padding({ left: 20, right: 20 })
-      .border({ width: { bottom: 1 }, color: Theme.COLOR_BORDER })
-      .backgroundColor(Theme.COLOR_BG)
+      .border({ width: { bottom: 1 }, color: Theme.GLASS_BORDER })
+      .backgroundColor(Theme.GLASS_HEADER)
 
       // 消息区
       if (this.messages.length === 0) {
@@ -99,8 +100,9 @@ export struct ChatView {
       Image($r('app.media.icon'))
         .width(72)
         .height(72)
-        .opacity(0.85)
+        .opacity(0.9)
         .borderRadius(20)
+        .shadow({ radius: 18, color: 'rgba(61,86,224,0.25)', offsetY: 4 })
       Text('DeepSeek Harness')
         .fontSize(20)
         .fontWeight(FontWeight.Bold)

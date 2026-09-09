@@ -1,5 +1,6 @@
 /**
  * InputBar：底部输入栏（多行输入 + 发送/停止）。
+ * 沉浸光感：输入框玻璃 + 发送按钮品牌渐变。
  * 参照华为开发者文档《文本输入 (TextInput/TextArea)》：TextArea 多行输入，
  * enterKeyType + onSubmit 实现回车发送。
  */
@@ -23,8 +24,9 @@ export struct InputBar {
         .fontColor(Theme.COLOR_TEXT)
         .placeholderFont({ size: 14 })
         .placeholderColor(Theme.COLOR_SUBTEXT)
-        .backgroundColor(Theme.COLOR_SURFACE)
-        .borderRadius(12)
+        .backgroundColor(Theme.GLASS_INPUT)
+        .borderRadius(14)
+        .border({ width: 1, color: Theme.GLASS_BORDER })
         .padding(12)
         .onChange((value: string) => {
           this.input = value;
@@ -43,7 +45,7 @@ export struct InputBar {
             .fontSize(14)
             .backgroundColor(Theme.COLOR_ERROR)
             .fontColor(Color.White)
-            .borderRadius(10)
+            .borderRadius(11)
             .onClick(() => {
               this.onStop();
             })
@@ -52,9 +54,15 @@ export struct InputBar {
             .width(88)
             .height(40)
             .fontSize(14)
-            .backgroundColor(this.connected ? Theme.COLOR_PRIMARY : Theme.COLOR_SURFACE)
             .fontColor(this.connected ? Color.White : Theme.COLOR_SUBTEXT)
-            .borderRadius(10)
+            .linearGradient({
+              angle: 135,
+              colors: this.connected ?
+                [[Theme.BRAND_GRAD_START, 0], [Theme.BRAND_GRAD_END, 1]] :
+                [[Theme.COLOR_SURFACE, 0], [Theme.COLOR_SURFACE, 1]],
+            })
+            .borderRadius(11)
+            .shadow({ radius: 8, color: this.connected ? 'rgba(61,86,224,0.28)' : 'rgba(0,0,0,0)', offsetY: 2 })
             .onClick(() => {
               this.doSend();
             })
@@ -67,7 +75,7 @@ export struct InputBar {
     }
     .width('100%')
     .padding({ left: 20, right: 20, top: 12, bottom: 16 })
-    .border({ width: { top: 1 }, color: Theme.COLOR_BORDER })
+    .border({ width: { top: 1 }, color: Theme.GLASS_BORDER })
     .backgroundColor(Theme.COLOR_BG)
   }
 

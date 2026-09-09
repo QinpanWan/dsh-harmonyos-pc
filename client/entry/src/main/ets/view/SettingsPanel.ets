@@ -238,7 +238,7 @@ export struct SettingsPanel {
 
   build() {
     Column() {
-      // 固定头部
+      // 固定头部（轻玻璃 + 底部细光边）
       Row() {
         Text('设置')
           .fontSize(17)
@@ -250,15 +250,17 @@ export struct SettingsPanel {
           .height(34)
           .fontSize(15)
           .fontColor(Theme.COLOR_SUBTEXT)
-          .backgroundColor(Theme.COLOR_SURFACE)
+          .backgroundColor(Theme.GLASS_INPUT)
           .borderRadius(17)
+          .border({ width: 1, color: Theme.GLASS_BORDER })
           .onClick(() => {
             this.onClose();
           })
       }
       .width('100%')
       .padding({ left: 20, right: 20, top: 16, bottom: 10 })
-      .border({ width: { bottom: 1 }, color: Theme.COLOR_BORDER })
+      .border({ width: { bottom: 1 }, color: Theme.GLASS_BORDER })
+      .backgroundColor(Theme.GLASS_HEADER)
 
       // 可滚动内容区
       Scroll() {
@@ -276,8 +278,9 @@ export struct SettingsPanel {
             .fontColor(Theme.COLOR_TEXT)
             .selectedOptionFont({ size: 14 })
             .optionFont({ size: 14 })
-            .backgroundColor(Theme.COLOR_SURFACE)
+            .backgroundColor(Theme.GLASS_INPUT)
             .borderRadius(10)
+            .border({ width: 1, color: Theme.GLASS_BORDER })
             .onSelect((index: number, value: string) => {
               this.modeIndex = index;
               this.onModeChange(index === 1 ? 'dsh' : 'direct');
@@ -378,8 +381,9 @@ export struct SettingsPanel {
             }
             .width('100%')
             .padding(12)
-            .backgroundColor(Theme.COLOR_SURFACE)
+            .backgroundColor(Theme.GLASS_INPUT)
             .borderRadius(12)
+            .border({ width: 1, color: Theme.GLASS_BORDER })
           } else {
             // —— dsh 服务模式 ——
             Text('服务器连接')
@@ -454,9 +458,10 @@ export struct SettingsPanel {
                 .width('100%')
                 .height(38)
                 .fontSize(14)
-                .backgroundColor(Theme.COLOR_SURFACE_HOVER)
+                .backgroundColor(Theme.GLASS_INPUT)
                 .fontColor(Theme.COLOR_TEXT)
                 .borderRadius(10)
+                .border({ width: 1, color: Theme.GLASS_BORDER })
                 .onClick(() => {
                   this.saveApiKey();
                 })
@@ -495,8 +500,9 @@ export struct SettingsPanel {
             }
             .width('100%')
             .padding(12)
-            .backgroundColor(Theme.COLOR_SURFACE)
+            .backgroundColor(Theme.GLASS_INPUT)
             .borderRadius(12)
+            .border({ width: 1, color: Theme.GLASS_BORDER })
 
             // —— 连接状态 + 保存重连 ——
             Row({ space: 8 }) {
@@ -560,6 +566,6 @@ export struct SettingsPanel {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(Theme.COLOR_BG)
+    .backgroundColor(Theme.GLASS_HEADER)
   }
 }

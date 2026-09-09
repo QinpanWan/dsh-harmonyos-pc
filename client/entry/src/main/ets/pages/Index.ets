@@ -698,93 +698,94 @@ struct Index {
 
   // —— UI ——
 
-  build() {
-    Stack() {
-      Row() {
-        Sidebar({
-          sessions: $sessions,
-          currentSessionId: this.currentSessionId,
-          connected: this.connected,
-          statusText: this.statusText,
-          directMode: this.mode === 'direct',
-          onSelect: (id: string) => { this.selectSession(id); },
-          onNew: () => { this.newSession(); },
-          onSettings: () => {
-            this.showSettings = true;
-            this.loadPresets();
-          }
-        })
-        ChatView({
-          title: this.currentTitle,
-          messages: $messages,
-          streaming: this.streaming,
-          connected: this.connected,
-          directMode: this.mode === 'direct',
-          scroller: this.scroller,
-          onSend: (text: string) => { this.sendMessage(text); },
-          onStop: () => { this.stopGeneration(); }
-        })
+  @Builder
+  settingsSheet() {
+    SettingsPanel({
+      serverUrl: this.serverUrl,
+      connected: this.connected,
+      statusText: this.statusText,
+      presetIds: this.presetIds,
+      currentPreset: this.currentPreset,
+      client: this.client,
+      mode: this.mode,
+      directApiKey: this.directApiKey,
+      directModel: this.directModel,
+      directModels: this.directModels,
+      onModeChange: (m: string) => {
+        this.mode = m;
+        this.saveMode(m);
+        if (m === 'dsh') {
+          // 切到 dsh 模式：清空直连本地消息，连接后自动加载服务端会话
+          this.deepseek.stop();
+          this.messages = [];
+          this.currentTitle = '';
+        }
+        this.applyMode();
+      },
+      onSaveDirect: (key: string, model: string) => {
+        this.directApiKey = key;
+        this.directModel = model;
+        this.saveDirectConfig();
+      },
+      onSave: (url: string) => {
+        this.serverUrl = url;
+        this.saveServerUrl();
+        this.connect();
+      },
+      onPresetSelect: (preset: string) => {
+        this.currentPreset = preset;
+        this.saveAgentPreset(preset);
+      },
+      onClose: () => {
+        this.showSettings = false;
       }
-      .width('100%')
-      .height('100%')
-      .backgroundColor(Theme.COLOR_BG)
+    })
+    .height('100%')
+    .width('100%')
+  }
 
-      // 设置抽屉：右侧滑出面板 + 半透明遮罩（替代 bindSheet，2in1 桌面形态更可靠）
-      if (this.showSettings) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('#66000000')
-          .onClick(() => {
-            this.showSettings = false;
-          })
-        SettingsPanel({
-          serverUrl: this.serverUrl,
-          connected: this.connected,
-          statusText: this.statusText,
-          presetIds: this.presetIds,
-          currentPreset: this.currentPreset,
-          client: this.client,
-          mode: this.mode,
-          directApiKey: this.directApiKey,
-          directModel: this.directModel,
-          directModels: this.directModels,
-          onModeChange: (m: string) => {
-            this.mode = m;
-            this.saveMode(m);
-            if (m === 'dsh') {
-              // 切到 dsh 模式：清空直连本地消息，连接后自动加载服务端会话
-              this.deepseek.stop();
-              this.messages = [];
-              this.currentTitle = '';
-            }
-            this.applyMode();
-          },
-          onSaveDirect: (key: string, model: string) => {
-            this.directApiKey = key;
-            this.directModel = model;
-            this.saveDirectConfig();
-          },
-          onSave: (url: string) => {
-            this.serverUrl = url;
-            this.saveServerUrl();
-            this.connect();
-          },
-          onPresetSelect: (preset: string) => {
-            this.currentPreset = preset;
-            this.saveAgentPreset(preset);
-          },
-          onClose: () => {
-            this.showSettings = false;
-          }
-        })
-        .width(400)
-        .height('100%')
-        .align(Alignment.End)
-        .border({ width: { left: 1 }, color: Theme.COLOR_BORDER })
-      }
+  build() {
+    Row() {
+      Sidebar({
+        sessions: $sessions,
+        currentSessionId: this.currentSessionId,
+        connected: this.connected,
+        statusText: this.statusText,
+        directMode: this.mode === 'direct',
+        onSelect: (id: string) => { this.selectSession(id); },
+        onNew: () => { this.newSession(); },
+        onSettings: () => {
+          this.showSettings = true;
+          this.loadPresets();
+        }
+      })
+      ChatView({
+        title: this.currentTitle,
+        messages: $messages,
+        streaming: this.streaming,
+        connected: this.connected,
+        directMode: this.mode === 'direct',
+        scroller: this.scroller,
+        onSend: (text: string) => { this.sendMessage(text); },
+        onStop: () => { this.stopGeneration(); }
+      })
     }
     .width('100%')
     .height('100%')
+    .backgroundColor(Theme.COLOR_BG)
+    // 设置：由下而上鸿蒙半模态弹窗（沉浸光感 + 挡位 + 拖动条）
+    .bindSheet($$this.showSettings, this.settingsSheet(), {
+      height: SheetSize.LARGE,
+      detents: [SheetSize.MEDIUM, SheetSize.LARGE],
+      preferType: SheetType.BOTTOM,
+      blurStyle: BlurStyle.Thick,
+      dragBar: true,
+      showClose: true,
+      backgroundColor: Theme.GLASS_HEADER,
+      onWillDismiss: (dismissSheetAction: DismissSheetAction) => {
+        this.showSettings = false;
+        dismissSheetAction.dismiss();
+      }
+    })
   }
 }
