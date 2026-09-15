@@ -55,6 +55,11 @@ const WORKER_CJS_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-sessi
 // huawei-devdocs 守卫消息）或 deepseek-harness 开发期 subagent descriptor v2，整段 v0→v1 迁移被拒，
 // 表现为「全部会话历史加载失败」。需给 dsh-session-format-v0-to-v1 冻结校验打兼容补丁，纳入 patchAll 幂等重打。
 const SESSION_FORMAT_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-session-format-v0-to-v1', 'lib', 'index.js');
+// 0.1.6-alpha.1：subagent 身份投影(dsh-subagent descriptorIdentity)只认 descriptor version 3，
+// 本机 deepseek-harness 开发期(2026-08)会话写的是 version 2 → 投影 null，Web 侧按 subagent 地址打开
+// 这些子会话直接报 "subagent descriptor is corrupt"（0.1.3 起即如此，历史遗留）。补丁只对 identity
+// (mode/label) 做 v2 宽容解析，不动 foldSubagentDescriptor 的续跑/恢复语义。
+const SUBAGENT_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-subagent', 'lib', 'index.js');
 
 function log(...parts) {
   const line = `[${new Date().toISOString()}] ${parts.join(' ')}`;
@@ -589,17 +594,51 @@ function patchMigrationPublish() {
   return { changed: true };
 }
 
+// ---- subagent 身份投影：兼容遗留 descriptor version 2（只影响 Web 侧子会话寻址） ----
+function patchLegacySubagentIdentity() {
+  const txt = readFileSafe(SUBAGENT_FILE);
+  if (!txt) throw new Error('dsh-subagent 文件不存在，需手动处理: ' + SUBAGENT_FILE);
+  if (txt.includes('HarmonyOS patch: 遗留 descriptor version 2')) return { changed: false };
+  const anchor = '\tif (descriptor === void 0) return void 0;\n\treturn descriptor.mode === "one-shot" ? {';
+  const count = txt.split(anchor).length - 1;
+  if (count !== 1) throw new Error('subagent 身份投影补丁锚点缺失/重复(count=' + count + ')，需手动处理: ' + SUBAGENT_FILE);
+  const helper = '\t/* HarmonyOS patch: 遗留 descriptor version 2 */\n' +
+    '\tif (descriptor === void 0) descriptor = legacyIdentityDescriptor(event);';
+  const replacement = helper + '\n\tif (descriptor === void 0) return void 0;\n\treturn descriptor.mode === "one-shot" ? {';
+  let out = txt.replace(anchor, replacement);
+  const helperAnchor = '/** Interpret one `subagent/descriptor` event\'s identity; no value when the payload cannot be trusted. */\n';
+  const helperFn =
+    '/** HarmonyOS patch: 遗留 descriptor version 2 的 identity 解析；只取 mode/label，失败即放弃。 */\n' +
+    'function legacyIdentityDescriptor(event) {\n' +
+    '\ttry {\n' +
+    '\t\tconst data = event.data;\n' +
+    '\t\tif (typeof data !== "object" || data === null || data.version !== 2) return void 0;\n' +
+    '\t\tconst provider = typeof data.provider === "string" ? data.provider : "";\n' +
+    '\t\tif (data.mode === "one-shot") return { version: 3, mode: "one-shot", provider, ...typeof data.label === "string" ? { label: data.label } : {} };\n' +
+    '\t\tif (data.mode === "continuable" && typeof data.label === "string") return { version: 3, mode: "continuable", provider, label: data.label };\n' +
+    '\t\treturn void 0;\n' +
+    '\t} catch {\n' +
+    '\t\treturn void 0;\n' +
+    '\t}\n' +
+    '}\n';
+  if (!out.includes(helperAnchor)) throw new Error('subagent identity 函数锚点缺失，需手动处理: ' + SUBAGENT_FILE);
+  out = out.replace(helperAnchor, helperFn + helperAnchor);
+  writeFileSync(SUBAGENT_FILE, out);
+  return { changed: true };
+}
+
 function patchAll() {
   const l = syncCompatLoaders();
   const r1 = patchCredentials(), r2 = patchSession(), r3 = patchPermission(), r4 = patchAttachment(), r5 = patchVision();
   const r6 = patchCordisLoader(), r7 = patchSettingsCompat(), r8 = patchLoopbackAuth(), r9 = patchFsLocal(), r10 = patchImportMetaMain(), r11 = patchWorkerZlib(), r12 = patchSessionVerify(), r13 = patchSessionFormat(), r14 = patchMigrationPublish();
-  for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE]) {
+  const r15 = patchLegacySubagentIdentity();
+  for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE, SUBAGENT_FILE]) {
     if (!readFileSafe(f).includes(MARK)) throw new Error('补丁校验失败(标记缺失): ' + f);
   }
   if (!readFileSafe(FS_LOCAL_FILE).includes('HarmonyOS /storage mounts reject hard links')) {
     throw new Error('补丁校验失败(标记缺失): ' + FS_LOCAL_FILE);
   }
-  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed };
+  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed, subagentIdentity: r15.changed };
 }
 
 // compat-loader.mjs（node v22 鸿蒙运行时 polyfill）依赖的纯 JS 包。重装核心包时它们不在依赖树里
@@ -773,4 +812,5 @@ async function main() {
   try { await interactive(); } finally { releaseLock(); }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch(() => process.exit(1));
+// 静默 rc=1 无法定位失败补丁（2026-09-15 实测：patch 失败只回退出码），改为打印错误栈。
+if (process.argv[1] === fileURLToPath(import.meta.url)) main().catch((error) => { console.error('✗ ' + (error && error.stack ? error.stack : error)); process.exit(1); });

@@ -362,6 +362,19 @@ This project does not include dsh source code; it only contains independently wr
 
 ## Changelog
 
+### 2026-09-15 — Follow upstream 0.1.6-alpha.1 (usability fixes; sidebar terminal unavailable for now)
+
+Upstream `0.1.6-alpha.1` is installed on this device (`~/dsh-test`, re-applying all 13 patches through `~/bin/dsh-update.mjs`). The web app would not boot and model calls returned 404 on upgrade day; fixes, root cause first:
+
+- **Inlined flock shim (compat-loader)**: 0.1.6 moved the session write lease from `fs-ext` to `@deepseek-ai/node-addon-system/flock`, which ships no openharmony-arm64 prebuild (its `loadBinding` resolves the platform package first and fails). The loader now resolves that specifier to a no-op shim — upstream documents that a single-process deployment may treat flock as immediately successful (the browser worker does exactly that), and this device runs one process.
+- **`node:util` compat layer**: 0.1.6's `dsh-subprocess-local` runner calls `util.getSystemErrorMessage`, added in node >=23.6 (this runtime is v22.7). The loader serves a `node:util?compat` wrapper (`export * from 'node:util'` plus an errno-to-libuv-message table with a name fallback).
+- **Config regression: `llm-deepseek.baseURL`**: as of 0.1.6 an explicit `baseURL` is used verbatim (0.1.3 appended `/anthropic` by protocol); the Messages protocol root is `https://api.deepseek.com/anthropic`. The device pinned `https://api.deepseek.com`, so every request 404'd (`DeepSeek Messages request failed (404)`). It is now left unset so the protocol default applies.
+- **Plugin regression: `dsh-huawei-local-llm`**: 0.1.6's `PiAiAdapter` reads `profile.modelErrors`, and the hand-built profile lacked it, so the `session/modelCatalog` probe threw `Cannot read properties of undefined (reading 'get')` and the provider fell into `failures`; `modelErrors`/`catalogError`/`reasoning` are now supplied.
+- **`dsh-subagent` legacy descriptor v2 identity projection** (`patchLegacySubagentIdentity()`): identity projection has accepted only descriptor version 3 since 0.1.3, while sessions written by this device's 2026-08 development builds carry version 2, so opening such a subagent address from the web UI reported a corrupt descriptor; the patch tolerates v2 for identity (mode/label) only, leaving continuation/recovery semantics untouched.
+- **Sidebar terminal unavailable (new upstream feature)**: 0.1.6 adds the host `dsh-api-terminal-controller`, the client `ui-sidebar-terminal`, and `ptc-runtime`, all of which depend on the `subprocess` service = `@deepseek-ai/dsh-subprocess-local`; that package statically imports `node-pty` (pty allocation) and `koffi` (FFI execve) at the top level, and HarmonyOS blocks dlopen of untrusted ELF plus ships no openharmony-arm64 prebuild, so the module fails with `Cannot find the native Koffi module`. `harmony.patch.yml` disables all three rows (host and client together), which also removes the leftover "did not activate" startup warning. Re-enable once upstream offers a pure-JS/standalone pty or HarmonyOS permits native modules.
+
+**Verified after upgrade**: clean boot (only the known `@napi-rs/canvas` and UV notices); `settings/describe` reports 19 namespaces including `llm-pi-ai`; `session/modelCatalog` lists 7 routable providers with `failures: []`; `session/list` returns 280 sessions; a deep legacy session (turn 285) pages correctly; a new session's `session/prompt` produced a model reply and `turn/end reason=completed`.
+
 ### 2026-09-09 — Fix "web UI cannot message sessions" after 0.1.3-alpha.2 (4 resume-chain regressions)
 
 Resuming any pre-upgrade session failed mid-resume, so sending from the web UI appeared broken. Root causes, each fixed:

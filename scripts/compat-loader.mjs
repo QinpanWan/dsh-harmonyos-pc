@@ -12,7 +12,7 @@
 // `fzstd` package so dsh can read the existing .jsonl.zstd sessions it creates.
 'use strict';
 
-const COMPAT_NAMES = new Set(['node:zlib', 'node:module']);
+const COMPAT_NAMES = new Set(['node:zlib', 'node:module', 'node:util']);
 const DSH_ROOT = 'file:///storage/Users/currentUser/dsh-test/';
 
 export function resolve(specifier, context, nextResolve) {
@@ -20,6 +20,14 @@ export function resolve(specifier, context, nextResolve) {
   // fs-ext is a native addon (no HarmonyOS build; flock is only used for a
   // cross-process lease that a single-process deployment never contends on).
   if (specifier === 'fs-ext') return { url: DSH_ROOT + 'fs-ext?compat', shortCircuit: true };
+  // 0.1.6-alpha.1：session 写租约的原生 flock 从 fs-ext 换成 @deepseek-ai/node-addon-system/flock，
+  // 鸿蒙没有 openharmony-arm64 预编译包（loadBinding 走 process.platform 拼包名，直接解析失败/抛
+  // ERR_FLOCK_UNSUPPORTED_PLATFORM），一次回合写入就会整个失败。官方注释写明「单进程部署可把
+  // flock 置为立即成功（browser worker 就是这么做的），进程内写占用声明已足够互斥」——
+  // 本机 dsh 单进程运行，故按同款语义替换为 no-op。
+  if (specifier === '@deepseek-ai/node-addon-system/flock') {
+    return { url: DSH_ROOT + 'node-addon-system-flock?compat', shortCircuit: true };
+  }
   if (COMPAT_NAMES.has(specifier) && !parent.startsWith('node:')) {
     return { url: `${specifier}?compat`, shortCircuit: true };
   }
@@ -139,9 +147,61 @@ export function createZstdCompress() {
 
 `;
 
+// node v22.7 lacks getSystemErrorMessage (added in v23.6) which 0.1.6's
+// dsh-subprocess-local runner uses to render syscall failures ("ENOENT: no such
+// file or directory, execve '...'"). The libuv text table is not reachable from
+// JS, so carry the common errno messages and fall back to the errno name.
+const UTIL_SOURCE = `
+import * as _util from 'node:util';
+export * from 'node:util';
+export default _util;
+
+const ERRNO_MESSAGE = {
+  EPERM: 'operation not permitted', ENOENT: 'no such file or directory', ESRCH: 'no such process',
+  EINTR: 'interrupted system call', EIO: 'input/output error', ENXIO: 'no such device or address',
+  E2BIG: 'argument list too long', ENOEXEC: 'exec format error', EBADF: 'bad file descriptor',
+  ECHILD: 'no child processes', EAGAIN: 'resource temporarily unavailable', ENOMEM: 'not enough memory',
+  EACCES: 'permission denied', EFAULT: 'bad address', EBUSY: 'resource busy or locked',
+  EEXIST: 'file already exists', EXDEV: 'cross-device link', ENODEV: 'no such device',
+  ENOTDIR: 'not a directory', EISDIR: 'illegal operation on a directory', EINVAL: 'invalid argument',
+  ENFILE: 'file table overflow', EMFILE: 'too many open files', ENOTTY: 'inappropriate ioctl for device',
+  ETXTBSY: 'text file busy', EFBIG: 'file too large', ENOSPC: 'no space left on device',
+  ESPIPE: 'invalid seek', EROFS: 'read-only file system', EMLINK: 'too many links',
+  EPIPE: 'broken pipe', ENAMETOOLONG: 'name too long', ENOSYS: 'function not implemented',
+  ENOTEMPTY: 'directory not empty', ELOOP: 'too many symbolic links encountered',
+  EOVERFLOW: 'value too large for defined data type', EOPNOTSUPP: 'operation not supported on socket',
+  ECANCELED: 'operation canceled', EINPROGRESS: 'operation in progress',
+  EALREADY: 'connection already in progress', ENOTSOCK: 'socket operation on non-socket',
+  EDESTADDRREQ: 'destination address required', EMSGSIZE: 'message too long',
+  EPROTOTYPE: 'protocol wrong type for socket', ENOPROTOOPT: 'protocol not available',
+  EPROTONOSUPPORT: 'protocol not supported', ESOCKTNOSUPPORT: 'socket type not supported',
+  ENOTSUP: 'operation not supported', EAFNOSUPPORT: 'address family not supported by protocol',
+  EADDRINUSE: 'address already in use', EADDRNOTAVAIL: 'address not available',
+  ENETDOWN: 'network is down', ENETUNREACH: 'network is unreachable', ENETRESET: 'connection reset by network',
+  ECONNABORTED: 'connection aborted', ECONNRESET: 'connection reset by peer', ENOBUFS: 'no buffer space available',
+  EISCONN: 'socket is already connected', ENOTCONN: 'socket is not connected',
+  ETIMEDOUT: 'connection timed out', ECONNREFUSED: 'connection refused',
+  EHOSTUNREACH: 'no route to host', EPROTO: 'protocol error', EDEADLK: 'resource deadlock avoided',
+  ENOLCK: 'no locks available', EDQUOT: 'disk quota exceeded'
+};
+
+/** HarmonyOS patch: libuv message for an errno; name-based fallback when unknown. */
+export function getSystemErrorMessage(errno) {
+  let name = '';
+  try { name = _util.getSystemErrorName(errno); } catch (error) { name = 'UNKNOWN'; }
+  return ERRNO_MESSAGE[name] || name;
+}
+`;
+
 const MODULE_SOURCE = `
 export * from 'node:module';
 export function stripTypeScriptTypes(source) { return { source }; }
+`;
+
+const FLOCK_SOURCE = `
+// HarmonyOS patch: 无 openharmony-arm64 原生 flock；单进程部署下立即成功即可
+// （见 node-addon-system 官方 lease 说明与 dsh-session-persistence-jsonl 的 browser worker 先例）。
+export async function tryLockExclusive(_fd) { return undefined; }
 `;
 
 const FS_EXT_SOURCE = `
@@ -160,11 +220,17 @@ export function load(url, context, nextLoad) {
   if (url === DSH_ROOT + 'fs-ext?compat') {
     return { format: 'module', source: FS_EXT_SOURCE, shortCircuit: true };
   }
+  if (url === DSH_ROOT + 'node-addon-system-flock?compat') {
+    return { format: 'module', source: FLOCK_SOURCE, shortCircuit: true };
+  }
   if (url === 'node:zlib?compat') {
     return { format: 'module', source: ZLIB_SOURCE, shortCircuit: true };
   }
   if (url === 'node:module?compat') {
     return { format: 'module', source: MODULE_SOURCE, shortCircuit: true };
+  }
+  if (url === 'node:util?compat') {
+    return { format: 'module', source: UTIL_SOURCE, shortCircuit: true };
   }
   return nextLoad(url, context);
 }

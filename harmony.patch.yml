@@ -6,6 +6,18 @@
   disabled: true
 - id: bash-sandbox
   disabled: true
+# ── v0.1.6-alpha.1 新增行 ────────────────────────────────────────────────
+# 侧边栏终端(host: dsh-api-terminal-controller / client: ui-sidebar-terminal) 依赖 `subprocess`
+# 服务 = @deepseek-ai/dsh-subprocess-local。该包顶层静态 import node-pty(pty 分配) 与
+# koffi(FFI execve) 两个原生模块，鸿蒙禁 dlopen 非受信 ELF 且无 openharmony-arm64 预编译包 →
+# 模块加载即 "Cannot find the native Koffi module"。宿主/客户端两侧一起禁用，boot 不再留待激活告警。
+- id: terminal-controller
+  disabled: true
+- id: ui-sidebar-terminal
+  disabled: true
+# ptc-runtime(程序化工具调用运行时) 同时等 subprocess + sandbox，同理禁用。
+- id: ptc-runtime
+  disabled: true
 # permission-presets 已打 HarmonyOS patch：去 bash shell 依赖改用 fs 沙箱 sandboxMode，
 # 对话框权限预设(read-only/workspace-write/danger-full-access)恢复可用。
 - id: permission
@@ -30,6 +42,8 @@
     provider: spawn
     toolName: subagent
     backgroundMode: continuable
+    # 允许主循环按调用选子代理模型（策略见 settings.yaml: subagent-model-selection）
+    modelSelectionSettings: true
     agentOptions:
       provider: deepseek-official
       model: deepseek-v4-pro

@@ -449,6 +449,19 @@ MIT License，见 [LICENSE](LICENSE)。
 
 ## 更新记录
 
+### 2026-09-15 — 跟进官方 0.1.6-alpha.1（本机可用性修复；侧边栏终端暂不可用）
+
+官方 `0.1.6-alpha.1` 已在本机 `~/dsh-test` 升级完成（`~/bin/dsh-update.mjs` 幂等重打 13 项补丁）。升级当天 web 起不来、模型调用 404，逐项定位后修复如下：
+
+- **flock 内联 shim（compat-loader）**：0.1.6 把 session 写租约从 `fs-ext` 换成 `@deepseek-ai/node-addon-system/flock`（无 openharmony-arm64 预编译包，`loadBinding` 直接解析失败）。loader 新增 resolve 规则，把该 specifier 换成 no-op shim —— 官方注释写明单进程部署可把 flock 置为立即成功（browser worker 同款语义），本机单进程运行，进程内写占用声明已足够互斥。
+- **`node:util` 兼容层**：0.1.6 的 `dsh-subprocess-local` runner 用了 node ≥23.6 的 `util.getSystemErrorMessage`（v22.7 没有）。loader 新增 `node:util?compat` 包装（`export * from 'node:util'` + errno→libuv 文案表 + 名称兜底）。
+- **配置回归：`llm-deepseek.baseURL`**：0.1.6 起 `baseURL` 显式给出即按原样使用（0.1.3 会按 protocol 补 `/anthropic` 前缀），messages 协议的根是 `https://api.deepseek.com/anthropic`。本机 settings.yaml 原写死 `https://api.deepseek.com` → 每次请求 404（`DeepSeek Messages request failed (404)`）。改为留空走 protocol 默认，切到 chat/completions 时也不会写死错误前缀。
+- **插件回归：`dsh-huawei-local-llm`**：0.1.6 的 `PiAiAdapter` 起读 `profile.modelErrors`，手工构造的 profile 缺该字段 → `session/modelCatalog` 探针抛 `Cannot read properties of undefined (reading 'get')`，provider 落入 failures 列表；补 `modelErrors`/`catalogError`/`reasoning` 三个字段。
+- **`dsh-subagent` 遗留 descriptor v2 身份投影**（`patchLegacySubagentIdentity()`）：0.1.3 起身份投影只认 descriptor version 3，2026-08 开发期会话写的是 version 2 → Web 侧按 subagent 地址打开报 corrupt；补丁只对 identity（mode/label）做 v2 宽容解析，不动续跑/恢复语义。
+- **侧边栏终端暂不可用（官方新功能）**：0.1.6 新增 host `dsh-api-terminal-controller` + client `ui-sidebar-terminal` + `ptc-runtime`，三者都依赖 `subprocess` 服务 = `@deepseek-ai/dsh-subprocess-local`；该包顶层静态 `import node-pty`（pty 分配）与 `koffi`（FFI execve），鸿蒙禁 dlopen 非受信 ELF 且无 openharmony-arm64 预编译包 → 模块加载即 `Cannot find the native Koffi module`。`harmony.patch.yml` 显式禁用这三行（宿主与客户端一起），boot 不再遗留「did not activate」待激活告警。待上游提供纯 JS/独立 pty 实现，或鸿蒙放行原生模块后再启用。
+
+**升级后实测**：boot 无 error（仅剩已知 `@napi-rs/canvas` / UV 提示）；`settings/describe` 19 个命名空间（含 `llm-pi-ai`）；`session/modelCatalog` 7 个 provider 全部 routable 且 `failures: []`；`session/list` 返回 280 条；深历史会话（turn 285）`session/page` 可正常读；新建会话 `session/prompt` → 模型正常回包、`turn/end reason=completed`。
+
 ### 2026-09-09 — 修复 0.1.3-alpha.2 升级后「web 无法向会话发消息」（resume 链 4 处回归）
 
 升级后打开/续聊既有会话都会在 resume 中途失败，表现为 web UI 发送消息无效。逐层定位并修复：
