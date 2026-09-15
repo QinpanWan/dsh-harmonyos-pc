@@ -138,6 +138,8 @@
         provider: spawn
         toolName: subagent
         backgroundMode: continuable
+        # 允许主循环按调用选子代理模型（策略在 ~/.dsh/settings.yaml: subagent-model-selection）
+        modelSelectionSettings: true
         # 委派子代理路由到 Pro：主循环 off 便宜，复杂子任务 Pro 原生思考
         agentOptions:
           provider: deepseek-official
@@ -150,24 +152,18 @@
         provider: fork
         toolName: subagent_fork
         backgroundMode: continuable
+        # 允许主循环按调用选子代理模型（策略在 ~/.dsh/settings.yaml: subagent-model-selection）
+        modelSelectionSettings: true
         agentOptions:
           provider: deepseek-official
           model: deepseek-v4-pro
           maxTokens: 384000
 
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
-      config:
-        provider: spawn
-
-    - id: tool-workflow
-      name: '@deepseek-ai/dsh-tool-workflow'
-
-    - id: tool-ralph
-      name: '@deepseek-ai/dsh-tool-ralph'
-      config:
-        subagentProvider: spawn
-        maxRounds: 64
+    # ⚠ 0.1.6-alpha.1 起官方删除 @deepseek-ai/dsh-workflow-worker-thread（原纯 JS worker_threads 引擎），
+    # 工作流引擎改为沙箱子进程实现（dsh-workflow-ptc + dsh-ptc-runtime-node，依赖 subprocess/sandbox），
+    # 而鸿蒙上 subprocess 需要的 node-pty、sandbox 需要的 Koffi 都没有 openharmony-arm64 原生模块
+    # → 引擎必然 pending，preset 里只要有一行 pending 就整体挂载失败(agent-preset/invalid)。
+    # tool-ralph 也注入 workflowEngine，同样摘除。工作流/Ralph 在鸿蒙上暂不可用，详见 README「0.1.6 适配」。
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 - id: tool-ask-user

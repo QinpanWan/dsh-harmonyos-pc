@@ -15,6 +15,7 @@ export const TOOLS = {
   sdkHome: process.env.DEVECO_SDK_HOME ?? `${toolsHome}/sdk`,
   ohpmBin: process.env.DEVECO_OHPM_BIN ?? `${toolsHome}/ohpm/bin/ohpm`,
   hdcBin: process.env.DEVECO_HDC_BIN ?? `${toolsHome}/sdk/default/openharmony/toolchains/hdc`,
+  pythonBin: process.env.DEVECO_PYTHON_BIN ?? `python3`,
 };
 
 const DEFAULT_TIMEOUT_MS = 600_000;

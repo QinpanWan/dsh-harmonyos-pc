@@ -3,8 +3,10 @@
 // 提供的工具:
 //   - huawei_local_llm     : 直连本地模型对话 (OpenAI 兼容 /v1/chat/completions 或 原生 /api/chat)
 //   - huawei_local_models  : 列出本地可用模型 + 连通性/白名单诊断
-// 同时把 provider 'huawei-local' 写入 dsh 的 llm-pi-ai.providers，并直接向 ctx.llm 注册一个
-// 自包含的 OpenAI 兼容适配器（本机 llm-pi-ai 命名空间未挂载，仅写 settings.yaml 模型选择器读不到）。
+// 直接向 ctx.llm 注册一个自包含的 OpenAI 兼容适配器，使模型选择器能列出本地模型。
+// 不再直写 llm-pi-ai.providers：llm-pi-ai 命名空间现已在 settings 服务注册（曾因
+// settings.yaml 内 opencode-go 路由校验失败而整段挂起）；再写入 huawei-local 会造成
+// llm.registerAdapter 的 DUPLICATE_ADAPTER 冲突，llm-pi-ai 的其余路由会整批放弃注册。
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -402,6 +404,12 @@ function buildPiAdapter(config) {
     requestImageMaxBytes: 1024 * 1024,
     retryPolicy: void 0,
     configuredMaxTokens: new Map(),
+    /* 0.1.6-alpha.1: PiAiAdapter.profileOf/modelOf 起读 profile.modelErrors(Map) 与 catalogError，
+       手工构造的 profile 缺该字段会让 session.modelCatalog 探针抛
+       "Cannot read properties of undefined (reading 'get')" → provider 落入 failures 列表。 */
+    modelErrors: new Map(),
+    catalogError: void 0,
+    reasoning: void 0,
     piProvider
   };
   return new PiAiAdapter({
@@ -492,19 +500,10 @@ function apply(ctx, config = {}) {
 
   console.error(`[huawei-local-llm] registered 2 tools (${currentOrigin()}, model ${currentModel()})`);
 
-  // 把 provider 配置写入 dsh 的 settings.yaml（保留注释、幂等、原子+锁），
-  // 让模型选择器能选中本地模型。此写发生在启动期，失败只告警不影响 dsh。
-  void (async () => {
-    try {
-      const msg = await ensureProviderRegistered(config.models ?? [
-        { id: "qwen3:8b", name: "Qwen3 8B（华为本地）", contextWindow: 32768, maxTokens: 8192 },
-        { id: "qwen3:14b", name: "Qwen3 14B（华为本地）", contextWindow: 32768, maxTokens: 8192 }
-      ]);
-      console.error(`[huawei-local-llm] provider "${PROVIDER_ID}" -> settings.yaml: ${msg}`);
-    } catch (error) {
-      console.error(`[huawei-local-llm] provider auto-register skipped: ${String(error?.message ?? error)}`);
-    }
-  })();
+  // 自 2026-09-09 起不再直写 settings.yaml 的 llm-pi-ai.providers：
+  // 该段写入曾用于绕过 llm-pi-ai 命名空间未注册的问题，现已随命名空间恢复而移除
+  // （直写会导致 registerAdapter DUPLICATE_ADAPTER，llm-pi-ai 其它路由整批放弃）。
+  console.error(`[huawei-local-llm] provider "${PROVIDER_ID}" -> settings.yaml: 跳过直写（llm-pi-ai 命名空间已注册，由设置页管理）`);
 
   // 直接把 huawei-local 注册成 llm 适配器，使模型选择器（session.modelCatalog）能列出本地模型。
   // 兼容 llm-pi-ai 命名空间未挂载的本机构建；已在时跳过、失败只告警不影响 dsh。

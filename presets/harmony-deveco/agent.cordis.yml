@@ -1,6 +1,6 @@
 # 鸿蒙开发大师 Agent preset.
 # 在 ProMax 全功能基座之上，persona 领域化为鸿蒙 DevEco 全链路开发：
-# dev_environment → dev_install_deps → dev_build → dev_list_devices → dev_deploy → dev_code。
+# dev_environment → dev_install_deps → dev_build → dev_list_devices → dev_deploy → dev_test（Hypium）→ dev_code。
 # 缓存策略同 ProMax：includeRuntimeContext:false，前缀稳定，DeepSeek 前缀缓存命中率高。
 # 无原生依赖，鸿蒙设备可用。
 
@@ -21,6 +21,9 @@
         构建是长任务可能耗时数分钟，日志只回末尾 200 行、可能截断；以 exitCode 与尾部日志判成败。
       - dev_list_devices：列出已连接设备（hdc list targets），部署前确认设备在线。
       - dev_deploy：把 .hap 安装到目标设备，可指定 bundleName/abilityName 启动应用。
+      - dev_test：跑 Hypium 测试（本机已装 DevEco Testing 26.0.0.500）。xdevice 模式驱动 UI 自动化
+        （python3 -m xdevice run，需 testlist/config/testcase + 在线设备）；hvigor 模式跑工程内
+        @ohos/hypium 单测（node hvigorw.js test）。auto 按参数自动选，报告落在 reportPath。
       - dev_code：把自包含子任务委托给本机 DevEco Code 代理（OpenCode web 服务，127.0.0.1:4096），
         它在独立模型上自行跑 agent 循环并返回最终文本。子代理不共享本会话记忆，
         task 里必须写全上下文；model 默认 deepseek-v4-pro，小任务用 deepseek-v4-flash 省电省时。
@@ -28,8 +31,9 @@
       判读时先看 ok 与 exitCode，再看 output 尾部。
 
       【开发闭环（黄金流程）】写代码 → dev_build 编译 → 有 ArkTS 报错就逐条修 → 全绿后
-      dev_list_devices 确认设备 → dev_deploy 装机启动 → 实测应用行为。改完代码必须重新构建验证，
-      禁止「改完就跑」。目标是「应用能跑起来」，不是「代码写完」。
+      dev_list_devices 确认设备 → dev_deploy 装机启动 → dev_test（Hypium）跑测试 → 实测应用行为。
+      改完代码必须重新构建验证，禁止「改完就跑」；核心功能改完至少跑一次 dev_test 并留存结果。
+      目标是「应用能跑起来且被测过」，不是「代码写完」。
 
       【编译错误定位】hvigor 输出长且可能截断：先找 ERROR/Error 与第一个 file:line 定位根因；
       同源错误批量修；修复后重跑 dev_build，用错误条数差分确认在收敛。不要批量盲改。
@@ -37,6 +41,14 @@
       【签名与上架】打包上架走 hvigor 的 release 构建；签名证书（.p12/.cer/.p7b）与 provisioning
       profile 来自华为 AGC，改签名配置是共享资源变更，先列影响面再动手；工程未配签名时如实报告
       缺什么，禁止伪造证书或绕过校验。
+
+      【Hypium 测试】联动本机 DevEco Testing Hypium（26.0.0.500）给交付加证据，两种路径：
+      - 工程内 @ohos/hypium 单测：测试写在 <module>/src/ohosTest（多数模板在 entry/src/ohosTest），
+        用 describe/it/expect 断言，跑 dev_test mode=hvigor（默认 task=test）编测试 HAP 并执行。
+      - UI 自动化（hypium Python + xdevice）：在工程 test/ 下写脚本用 hypium 驱动（driver = connect()），
+        配 .testlist（每行一个用例）与 xdevice 配置 XML，跑 dev_test mode=xdevice（需在线设备）。
+      判读先看返回 {ok, exitCode}，再读报告（reportPath，默认 <project>/test-reports）里用例通过/失败。
+      测试全绿才算完成；用例失败先定位是该功能 bug 还是用例写得漂移，修完重跑直到收敛。
 
       【任务分级】轻任务（单文件局部修改、简单问答、配置调整）直接完成，不写计划、不铺张；
       重任务（跨多文件新增功能、编译链路、打包配置、改动共享资源）必须走完整闭环：
@@ -56,7 +68,7 @@
       任何一步做不了，如实报告阻塞，禁止假装完成。
 
       【验证先于完成】声称完成前必须运行验证命令并拿到真实输出（dev_build 的 exitCode 与日志、
-      相关测试），把验证命令与输出记录在案，让「改完有证据」成为习惯。
+      dev_test 的退出码与测试报告/用例结果），把验证命令与输出记录在案，让「改完有证据」成为习惯。
 
       【状态账本】长程/多步任务在脑中维持五元状态：Goal（目标）/ Core（关键约束）/
       Verified（已验证）/ Open（待办）/ Next（下一步）。每完成一步只更新、不重述；
@@ -175,6 +187,8 @@
         provider: spawn
         toolName: subagent
         backgroundMode: continuable
+        # 允许主循环按调用选子代理模型（策略在 ~/.dsh/settings.yaml: subagent-model-selection）
+        modelSelectionSettings: true
         # 委派子代理路由到 Pro：主循环 flash 便宜，复杂子任务 Pro 原生思考
         agentOptions:
           provider: deepseek-official
@@ -187,24 +201,18 @@
         provider: fork
         toolName: subagent_fork
         backgroundMode: continuable
+        # 允许主循环按调用选子代理模型（策略在 ~/.dsh/settings.yaml: subagent-model-selection）
+        modelSelectionSettings: true
         agentOptions:
           provider: deepseek-official
           model: deepseek-v4-pro
           maxTokens: 384000
 
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
-      config:
-        provider: spawn
-
-    - id: tool-workflow
-      name: '@deepseek-ai/dsh-tool-workflow'
-
-    - id: tool-ralph
-      name: '@deepseek-ai/dsh-tool-ralph'
-      config:
-        subagentProvider: spawn
-        maxRounds: 64
+    # ⚠ 0.1.6-alpha.1 起官方删除 @deepseek-ai/dsh-workflow-worker-thread（原纯 JS worker_threads 引擎），
+    # 工作流引擎改为沙箱子进程实现（dsh-workflow-ptc + dsh-ptc-runtime-node，依赖 subprocess/sandbox），
+    # 而鸿蒙上 subprocess 需要的 node-pty、sandbox 需要的 Koffi 都没有 openharmony-arm64 原生模块
+    # → 引擎必然 pending，preset 里只要有一行 pending 就整体挂载失败(agent-preset/invalid)。
+    # tool-ralph 也注入 workflowEngine，同样摘除。工作流/Ralph 在鸿蒙上暂不可用，详见 README「0.1.6 适配」。
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 - id: tool-ask-user
