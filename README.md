@@ -436,6 +436,7 @@ market 里点 GitHub 源插件时（`process.platform === 'openharmony'` 分支�
 - `bash`/终端执行与沙箱已禁用，Agent 无法真正跑 shell 命令，只能通过文件编辑 / 网页检索 / Skills / 计划 / 委派工作
 - 无法切回 `standard` / `code` / `minimal` 官方 preset（它们依赖被禁用的原生能力，会报 `agent-preset-invalid`）
 - 纯 UI 的 client 插件会变成空壳；WASM 运行时依赖只在调用时崩
+- 侧边栏终端**待上游支持**：0.1.6 新增的 host `dsh-api-terminal-controller` + client `ui-sidebar-terminal` 都依赖 `subprocess` 服务（`@deepseek-ai/dsh-subprocess-local`），而该包顶层静态 `import node-pty`（pty 分配）/ `koffi`（FFI execve）——鸿蒙禁 dlopen 非受信 ELF 且无 openharmony-arm64 预编译包，加载即 `Cannot find the native Koffi module`；`harmony.patch.yml` 已显式禁用这几行（宿主与客户端一起）。待上游提供纯 JS / 独立 pty 实现，或鸿蒙放行原生模块后再启用
 
 ---
 

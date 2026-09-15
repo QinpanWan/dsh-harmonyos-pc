@@ -349,6 +349,7 @@ Only plugins depending on **pure JS / `node:sqlite`** are selected. Native depen
 - `bash`/terminal execution and the sandbox are disabled; the Agent cannot actually run shell commands, and can only work through file editing / web search / Skills / planning / delegation
 - Cannot switch back to the official `standard` / `code` / `minimal` presets (they depend on disabled native capabilities and will report `agent-preset-invalid`)
 - Pure-UI client plugins become empty shells; WASM-runtime dependencies only crash when invoked
+- Sidebar terminal **awaits upstream support**: the 0.1.6 host `dsh-api-terminal-controller` and client `ui-sidebar-terminal` both depend on the `subprocess` service (`@deepseek-ai/dsh-subprocess-local`), which statically imports `node-pty` (pty allocation) and `koffi` (FFI execve) at the top level — HarmonyOS blocks dlopen of untrusted ELF and ships no openharmony-arm64 prebuild, so loading fails with `Cannot find the native Koffi module`; `harmony.patch.yml` disables those rows explicitly (host and client together). Re-enable once upstream offers a pure-JS/standalone pty or HarmonyOS permits native modules
 
 ---
 
