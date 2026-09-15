@@ -22,3 +22,12 @@
   disabled: true
 - id: permission
   disabled: true
+# 0.1.6-alpha.1 新增：ptc-runtime(程序化工具调用运行时) 需 subprocess+sandbox，
+# 依赖链 workflow-ptc(workflowEngine) / tool-workflow 同样只能待激活 —— 三行一起禁，
+# 避免 headless 启动刷「entries did not activate」告警。
+- id: ptc-runtime
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
