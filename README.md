@@ -450,6 +450,13 @@ MIT License，见 [LICENSE](LICENSE)。
 
 ## 更新记录
 
+### 2026-09-16 — 修「历史会话带 reasoning 块 → messages 协议整轮失败」
+
+- **现象**：升级到 0.1.6-alpha.1 后，某些会话每一轮都直接失败，UI 提示「本轮运行失败」，错误文案 `DeepSeek Messages cannot represent user/tool-result content reasoning`（`UNSUPPORTED_CONTENT`）。
+- **根因**：0.1.6 给 `dsh-llm-deepseek` 加了 `protocol: chat-completions | messages` 且**默认 `messages`**（Anthropic 风格、硬校验）；其序列化器只允许 `text`/`image`，遇到别的块类型直接抛错。而本机历史里有一批 user 消息内嵌 `reasoning` 块——来源是 **0.1.3-alpha.2 的 `dsh-subagent`**：当年的 `createSettlementMessage` 把子代理终态输出的全部内容块（含思考）整体搬进了「Background subagent … finished」结算通知，0.1.6 已改成只取 `text`，但旧会话数据还在。升级前走 chat-completions（`flattenText` 只取 text，非 text 静默丢弃），所以从不报错。
+- **修复**（`patchMessagesSkipNonText()`，纳入 `patchAll()` 幂等重打）：把 messages 协议序列化器里 `if (block.type !== "image") return unsupported(...)` 改成 `return []`，**静默跳过非 text/image 块**，语义与 chat-completions 对齐。只影响 user/`tool-result` 内容；assistant 侧分支与 system 消息校验未改。
+- **验证**：补丁前后 A/B 对比同一份带 `reasoning` 块的历史——打前抛 `UNSUPPORTED_CONTENT`，打后正常产出请求体且原文 text 保留；随后重启 dsh web，会话可继续。
+
 ### 2026-09-15 — 跟进官方 0.1.6-alpha.1（本机可用性修复；侧边栏终端暂不可用）
 
 官方 `0.1.6-alpha.1` 已在本机 `~/dsh-test` 升级完成（`~/bin/dsh-update.mjs` 幂等重打 13 项补丁）。升级当天 web 起不来、模型调用 404，逐项定位后修复如下：

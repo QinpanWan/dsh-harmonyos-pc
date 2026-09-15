@@ -60,6 +60,10 @@ const SESSION_FORMAT_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-s
 // 这些子会话直接报 "subagent descriptor is corrupt"（0.1.3 起即如此，历史遗留）。补丁只对 identity
 // (mode/label) 做 v2 宽容解析，不动 foldSubagentDescriptor 的续跑/恢复语义。
 const SUBAGENT_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-subagent', 'lib', 'index.js');
+// 0.1.6-alpha.1 的 dsh-llm-deepseek 新增 messages 协议(Anthropic 风格)并默认启用；其 user/tool-result
+// 序列化器只认 text/image，遇到历史会话里的 reasoning 块(0.1.3-alpha.2 dsh-subagent 结算通知遗留)
+// 直接抛 UNSUPPORTED_CONTENT 让整轮失败。补丁改为静默跳过，纳入 patchAll 幂等重打。
+const MESSAGES_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-llm-deepseek', 'lib', 'index.js');
 
 function log(...parts) {
   const line = `[${new Date().toISOString()}] ${parts.join(' ')}`;
@@ -627,18 +631,41 @@ function patchLegacySubagentIdentity() {
   return { changed: true };
 }
 
+// 0.1.6-alpha.1：dsh-llm-deepseek 新增 `protocol: messages`(Anthropic 风格，provider 层默认启用)，
+// 消息序列化器 serialize() 内联的 input() 只认 text/image，遇到别的块类型直接抛
+// LlmError(`DeepSeek Messages cannot represent user/tool-result content <type>`, UNSUPPORTED_CONTENT)。
+// 本机历史会话里有 0.1.3-alpha.2 版 dsh-subagent 结算通知(createSettlementMessage 当年整体回填 terminal
+// output)搬进 user 消息的 reasoning 块(全机 22 个会话文件含同类坏行，Monash 主会话 13 条)，于是任何一轮
+// 只要把这批历史发上去就整轮失败；升级前 chat-completions 走 flattenText 只取 text，故从不报错。
+// 补丁把该分支改成静默跳过，语义对齐 chat-completions；上游重装/升级会被冲掉，故纳入 patchAll 幂等重打。
+function patchMessagesSkipNonText() {
+  const txt = readFileSafe(MESSAGES_FILE);
+  if (!txt) throw new Error('dsh-llm-deepseek 文件不存在，需手动处理: ' + MESSAGES_FILE);
+  if (txt.includes('HarmonyOS patch: messages 序列化器跳过非 text/image 块')) return { changed: false };
+  const anchor = '\t\tif (block.type !== "image") return unsupported(`user/tool-result content ${block.type}`);';
+  const count = txt.split(anchor).length - 1;
+  if (count !== 1) throw new Error('messages 序列化补丁锚点缺失/重复(count=' + count + ')，需手动处理: ' + MESSAGES_FILE);
+  const replacement = '\t\t/* HarmonyOS patch: messages 序列化器跳过非 text/image 块 */\n' +
+    '\t\t/* 旧版 dsh-subagent 结算通知把 reasoning 块搬进了 user 消息；官方 messages 协议对未知块直接\n' +
+    '\t\t   UNSUPPORTED_CONTENT 整轮失败，这里静默跳过，语义对齐 chat-completions 的 flattenText。 */\n' +
+    '\t\tif (block.type !== "image") return [];';
+  writeFileSync(MESSAGES_FILE, txt.replace(anchor, replacement));
+  return { changed: true };
+}
+
 function patchAll() {
   const l = syncCompatLoaders();
   const r1 = patchCredentials(), r2 = patchSession(), r3 = patchPermission(), r4 = patchAttachment(), r5 = patchVision();
   const r6 = patchCordisLoader(), r7 = patchSettingsCompat(), r8 = patchLoopbackAuth(), r9 = patchFsLocal(), r10 = patchImportMetaMain(), r11 = patchWorkerZlib(), r12 = patchSessionVerify(), r13 = patchSessionFormat(), r14 = patchMigrationPublish();
   const r15 = patchLegacySubagentIdentity();
-  for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE, SUBAGENT_FILE]) {
+  const r16 = patchMessagesSkipNonText();
+  for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE, SUBAGENT_FILE, MESSAGES_FILE]) {
     if (!readFileSafe(f).includes(MARK)) throw new Error('补丁校验失败(标记缺失): ' + f);
   }
   if (!readFileSafe(FS_LOCAL_FILE).includes('HarmonyOS /storage mounts reject hard links')) {
     throw new Error('补丁校验失败(标记缺失): ' + FS_LOCAL_FILE);
   }
-  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed, subagentIdentity: r15.changed };
+  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed, subagentIdentity: r15.changed, messagesSkipNonText: r16.changed };
 }
 
 // compat-loader.mjs（node v22 鸿蒙运行时 polyfill）依赖的纯 JS 包。重装核心包时它们不在依赖树里

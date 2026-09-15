@@ -363,6 +363,13 @@ This project does not include dsh source code; it only contains independently wr
 
 ## Changelog
 
+### 2026-09-16 — Fix "history with reasoning blocks breaks every turn" under the Messages protocol
+
+- **Symptom**: after upgrading to 0.1.6-alpha.1 some sessions failed on every turn with the UI notice "本轮运行失败" and the error text `DeepSeek Messages cannot represent user/tool-result content reasoning` (`UNSUPPORTED_CONTENT`).
+- **Root cause**: 0.1.6 gave `dsh-llm-deepseek` a `protocol: chat-completions | messages` switch and made **`messages` the default** (Anthropic-style, strictly validated); its serializer only accepts `text`/`image` and throws on any other block type. This device's history contains user messages with embedded `reasoning` blocks, written by **`dsh-subagent` 0.1.3-alpha.2**: back then `createSettlementMessage` copied a subagent's entire terminal output — thinking blocks included — into the "Background subagent … finished" settlement notice. 0.1.6 keeps only `text` when writing those, but the existing history still carries them. Before the upgrade everything went through chat-completions (`flattenText` keeps text and silently drops the rest), so it never failed.
+- **Fix** (`patchMessagesSkipNonText()`, idempotently re-applied by `patchAll()`): the Messages serializer's `if (block.type !== "image") return unsupported(...)` became `return []`, i.e. **non-text/image blocks are skipped silently**, matching chat-completions semantics. Only user/`tool-result` content is affected; the assistant branch and the system-message validation are untouched.
+- **Verification**: A/B on the same history containing `reasoning` blocks — before the patch it threw `UNSUPPORTED_CONTENT`, after it produced the request body with the original text preserved; dsh web was then restarted and the session resumed normally.
+
 ### 2026-09-15 — Follow upstream 0.1.6-alpha.1 (usability fixes; sidebar terminal unavailable for now)
 
 Upstream `0.1.6-alpha.1` is installed on this device (`~/dsh-test`, re-applying all 13 patches through `~/bin/dsh-update.mjs`). The web app would not boot and model calls returned 404 on upgrade day; fixes, root cause first:
