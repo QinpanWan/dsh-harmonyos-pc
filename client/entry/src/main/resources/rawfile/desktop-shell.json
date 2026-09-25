@@ -1,0 +1,252 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "deepseek-ai/deepseek-harness",
+    "branch": "master",
+    "commit": "477b4f420553e8a52c2fbccc464d7561b239c443",
+    "appVersion": "0.1.7-rc.2",
+    "hostProtocolVersion": 4,
+    "scheme": "dsh-app",
+    "desktopPort": 19387,
+    "webPort": 3080
+  },
+  "window": {
+    "defaultWidth": 1280,
+    "defaultHeight": 820,
+    "minWidth": 520,
+    "minHeight": 600,
+    "titlebarHeight": 40,
+    "saveDebounceMs": 400
+  },
+  "update": {
+    "feedBase": "https://download.deepseek.com/dsh-desk/feeds",
+    "defaultTarget": "win-x64",
+    "manifestName": "nightly.yml",
+    "downloadPage": "https://download.deepseek.com/",
+    "intervalMs": 600000,
+    "maxBackoffMs": 3600000,
+    "jitter": 0.2,
+    "minIntervalMs": 1000,
+    "maxIntervalMs": 2147483647,
+    "quitInspectionDeadlineMs": 2000,
+    "requestTimeoutMs": 15000
+  },
+  "menus": [
+    {
+      "id": "application",
+      "labelKey": "application",
+      "items": [
+        {
+          "id": "about",
+          "labelKey": "aboutMenu"
+        },
+        {
+          "id": "separator",
+          "labelKey": "",
+          "separator": true
+        },
+        {
+          "id": "checkUpdates",
+          "labelKey": "checkUpdatesMenu"
+        },
+        {
+          "id": "separator",
+          "labelKey": "",
+          "separator": true
+        },
+        {
+          "id": "hideApplication",
+          "labelKey": "hideApplication"
+        },
+        {
+          "id": "hideOtherApplications",
+          "labelKey": "hideOtherApplications"
+        },
+        {
+          "id": "showAllApplications",
+          "labelKey": "showAllApplications"
+        },
+        {
+          "id": "separator",
+          "labelKey": "",
+          "separator": true
+        },
+        {
+          "id": "quit",
+          "labelKey": "quitApplication"
+        }
+      ]
+    },
+    {
+      "id": "edit",
+      "labelKey": "edit",
+      "items": [
+        {
+          "id": "undo",
+          "labelKey": "undo",
+          "shortcutId": "undo"
+        },
+        {
+          "id": "redo",
+          "labelKey": "redo",
+          "shortcutId": "redo"
+        },
+        {
+          "id": "separator",
+          "labelKey": "",
+          "separator": true
+        },
+        {
+          "id": "cut",
+          "labelKey": "cut",
+          "shortcutId": "cut"
+        },
+        {
+          "id": "copy",
+          "labelKey": "copy",
+          "shortcutId": "copy"
+        },
+        {
+          "id": "paste",
+          "labelKey": "paste",
+          "shortcutId": "paste"
+        },
+        {
+          "id": "delete",
+          "labelKey": "delete"
+        },
+        {
+          "id": "separator",
+          "labelKey": "",
+          "separator": true
+        },
+        {
+          "id": "selectAll",
+          "labelKey": "selectAll",
+          "shortcutId": "selectAll"
+        }
+      ]
+    },
+    {
+      "id": "view",
+      "labelKey": "viewMenu",
+      "items": [
+        {
+          "id": "reloadPage",
+          "labelKey": "reloadPageMenu",
+          "shortcutId": "reloadPage"
+        },
+        {
+          "id": "pickDirectory",
+          "labelKey": "pickDirectoryTitle"
+        },
+        {
+          "id": "restartAppHost",
+          "labelKey": "restartAppHostMenu"
+        },
+        {
+          "id": "separator",
+          "labelKey": "",
+          "separator": true
+        },
+        {
+          "id": "toggleFullscreen",
+          "labelKey": "toggleFullscreenMenu",
+          "shortcutId": "toggleFullscreen"
+        }
+      ]
+    },
+    {
+      "id": "help",
+      "labelKey": "helpMenu",
+      "items": [
+        {
+          "id": "checkUpdates",
+          "labelKey": "checkUpdatesMenu"
+        },
+        {
+          "id": "openDownloadPage",
+          "labelKey": "openDownloadPageMenu"
+        },
+        {
+          "id": "about",
+          "labelKey": "aboutMenu"
+        }
+      ]
+    }
+  ],
+  "shortcuts": [
+    {
+      "id": "closePage",
+      "labelKey": "closePage",
+      "key": "W",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "reloadPage",
+      "labelKey": "reloadPageMenu",
+      "key": "R",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "toggleFullscreen",
+      "labelKey": "toggleFullscreenMenu",
+      "key": "F11",
+      "ctrl": false,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "undo",
+      "labelKey": "undo",
+      "key": "Z",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "redo",
+      "labelKey": "redo",
+      "key": "Y",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "cut",
+      "labelKey": "cut",
+      "key": "X",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "copy",
+      "labelKey": "copy",
+      "key": "C",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "paste",
+      "labelKey": "paste",
+      "key": "V",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    },
+    {
+      "id": "selectAll",
+      "labelKey": "selectAll",
+      "key": "A",
+      "ctrl": true,
+      "shift": false,
+      "alt": false
+    }
+  ]
+}

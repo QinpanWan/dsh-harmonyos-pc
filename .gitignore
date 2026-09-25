@@ -4,3 +4,4 @@
 .superpowers/
 *.bak-*
 *.dbg
+.gen-tmp/

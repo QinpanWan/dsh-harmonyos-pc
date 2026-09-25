@@ -120,7 +120,7 @@ agent-presets:
 | `harmony-chat-rampagemax`（狂暴 Max） | 不省 token 只讲质量与交付 | 开运行上下文（前缀易变）+ 网页抓取全开 | + 委派组（全 Pro）+ 预检穷尽 / 双重验证 / 复盘铁律 |
 | `harmony-chat-rampagemax`（狂暴Max，慎用） | 不省 token 只讲质量与交付 | **打开**运行上下文，前缀动态、命中率低 | 全部 promax 能力 + 网页 fetch 全开 + 双重验证/交叉互证 + 委派全量 Pro + 预检穷尽扫描 |
 | `harmony-kb`（知识库专家） | 工作区即知识库：分层检索 / 深度研究 / 文档整理 / 脑图 / 笔记 | 关闭运行上下文，前缀稳定 | + 目录枚举（list_dir）+ Obsidian 双链笔记推送 |
-| `harmony-deveco`（开发大师） | 鸿蒙 DevEco 全链路开发（写 ArkTS → 编译 → 装真机 → 启动） | 关闭运行上下文，前缀稳定 | + dev_environment/build/install_deps/list_devices/deploy + dev_code（委托本机 DevEco Code 代理）+ 麒麟 X90 功耗纪律 |
+| `harmony-deveco`（开发大师） | 鸿蒙 DevEco 全链路开发（写 ArkTS → 编译 → 装真机 → 启动） | 关闭运行上下文，前缀稳定 | + dev_toolchain/environment/build/install_deps/list_devices/deploy/test + dev_code（委托本机 DevEco Code 代理）+ API 26/23 双工具链自动探测 + 麒麟 X90 功耗纪律 |
 | `harmony-chat-monash`（Monash 学生版） | Monash 全校区学生助手：文献解读 / 论文查重 / 作业辅助 + 学生服务与墨尔本交通知识库 | 关闭运行上下文，长稳定前缀（同 ProMax） | 同 promax 全工具集（fs / 检索 / 委派 / 工作流） |
 
 ### 2.4 六边形 ProMax：鸿蒙上交付能力的天花板
@@ -197,6 +197,10 @@ ln -s ~/dsh-test/node_modules/@deepseek-ai/dsh-deveco-bridge ~/.dsh/profiles/nod
 ```
 
 > **工具路径**：插件默认到 `$HOME/deveco/deveco_tools/` 找 node/hvigor/sdk/ohpm（DevEco Studio 默认安装位置）；自定义安装用 `DEVECO_TOOLS_HOME` 整体指路，或 `DEVECO_NODE_HOME` / `DEVECO_HVIGOR_HOME` / `DEVECO_SDK_HOME` / `DEVECO_OHPM_BIN` / `DEVECO_HDC_BIN` 逐项覆盖。
+>
+> **双工具链自动探测（API 26）**：本机有两套**互斥**的 DevEco 工具链——`api23` = `~/deveco/deveco_tools`（hvigor 6.23.15 + HarmonyOS 6.1.0(23)，版本号必须写 `"x.y.z(N)"`）与 `api26` = `~/deveco/suite/tools-api26`（hvigor 6.26.4 + HarmonyOS 26.0.0，版本号必须写裸 `"26.0.0"`）。`dev_build` / `dev_test` / `dev_install_deps` 会读工程 `build-profile.json5` 的 `compileSdkVersion`/`targetSdkVersion` 自动选工具链；API ≥ 26 的工程还会先把 Studio 那种 `"26.0.0(26)"` 写法改写成 hvigor 6.26.4 唯一认的 `"26.0.0"`（备份 `build-profile.json5.bak-api26`，`keepConfig:true` 可关掉）。新增第 8 个工具 **`dev_toolchain`**：`action=status` 只读探测（两套工具链 + 工程声明 + 该用哪套），`use-api26` 切到 API 26 配置，`restore` 退回切换前的 API 23 配置。工具链路径可用 `DEVECO_API26_ROOT` / `DEVECO_API23_ROOT` 覆盖；`DEVECO_TOOLCHAIN=api26` 可把默认工具链从 api23 换成 api26。
+>
+> **DevEco Studio 侧**：Studio 6.1.5.408 内置 SDK 只有 API 23，且 `DEVECO_SDK_HOME` 由 IDE 注入（工程 `local.properties` 对 `runtimeOS=HarmonyOS` 无效），所以 API 26 工程在 GUI 里同步/构建必然报 00303168 / 00306042。GUI 里要编 API 26 就装本仓库之外的 `~/deveco/suite/studio-api26-plugin`（**API26Build** 工具窗，走同一条命令行工具链，可探测/切换配置/构建），命令行继续用 `dev_build` 或 `sh ~/bin/hm-build.sh <工程>`。
 >
 > **`dev_code` 委托**：把自包含深子任务交给本机 DevEco Code 代理（OpenCode web，127.0.0.1:4096）跑独立 agent 循环。用前需先启动 DevEco Code 并配好 DeepSeek（`~/.deveco/deveco.jsonc`），地址可用 `DEVECO_WEB_BASE` 覆盖。每次委托约 13K 输入 token、串行执行，只对深子任务用（功耗纪律见预设人设）。
 
@@ -367,10 +371,12 @@ node scripts/dsh-update.mjs patch
 
 ### 界面
 
-- 左侧栏：品牌区、新建会话、会话列表（运行指示、选中高亮）、连接状态 + 设置入口
-- 聊天主区：顶部栏（会话标题 / 停止生成）、消息列表（用户气泡、助手富文本、代码块、工具卡片、流式光标）、底部输入栏（回车发送）
-- 设置面板（bindSheet 半模态）：配置连接模式、dsh 服务地址（默认 `http://127.0.0.1:3080`）、预设与服务端模型 Provider，持久化到 preferences
-- 连接双模式：**内置直连**（`direct`，默认——填 DeepSeek API Key 即用）与 **dsh 服务**（`dsh`——对接本机/局域网 dsh）
+- 左侧栏：品牌区（**单幅** `IconBrandFull`，鲸鱼与字标出自同一张矢量，不再叠两遍）、新建会话、会话列表（运行指示、选中高亮）、连接状态 + 设置入口
+- 聊天主区：顶部栏（工作区 › 会话标题 / 连接指示）、消息列表（用户气泡、助手富文本、代码块、工具卡片、流式光标），以及**全列唯一**的输入卡（hero 空会话 = 鲸鱼 + 标题 + 预览徽章 + 卡；有消息 = 正文 + 同一张卡停靠在底部）
+- 输入卡工具排（**同一排四枚**）：`+` 圆 → **工作区权限胶囊** → **工作区胶囊** → **对话模式胶囊**；右侧**模型胶囊**是真菜单（候选打 ✓ + 末行「模型与 API Key…」/「模型与连接设置…」直接进设置）。工作区/对话模式按主人要求从 hero 行搬到这里与工作区权限并排（上游把它们挂在输入卡**上方**）
+- 三枚选择器的数据源：**工作区权限** = `permissionPresets/catalog`（走 `/permission <preset>` 写入，完全权限/Auto review 先过风险确认）、**工作区** = 会话 `cwd` 候选 +「选择文件夹…」、**对话模式** = 独立模式取内置 `rawfile/presets.json`、dsh 服务模式取 `agentPresets/list`（首个回合后锁定）
+- 设置面板（bindSheet 半模态）：连接模式（**独立模式 / dsh 服务模式**）、独立模式的 API Key + 接口地址、dsh 服务地址（默认 `http://127.0.0.1:3080`）、服务端模型 Provider，持久化到 preferences
+- 连接双模式：**独立模式**（`direct`，默认——**开箱即用**：对话模式与系统提示随包内置，只填 DeepSeek API Key，不需要任何本地服务）与 **dsh 服务模式**（`dsh`——对接本机/局域网 dsh 实例，需先起 `scripts/dsh-web.sh`）
 - 沉浸光感玻璃主题：半透明玻璃面层 + 细光边 + 品牌蓝渐变（侧栏活动项 / 主按钮 / 助手气泡）
 - 端侧本地 AI（可选）：`module.json5` 已声明 `ohos.permission.USE_AI`，签名与白名单路径见 `docs/LOCAL-AI-USE_AI.md`
 
@@ -378,11 +384,27 @@ node scripts/dsh-update.mjs patch
 
 | 用途 | 端点 | 说明 |
 |---|---|---|
-| 单次 RPC | `POST /api/session.list` 等 | body 为 `client-request` 信封，响应 `server-response` |
-| 事件流 | `GET /api/events.mux` | SSE（`data:` 行 + `\n\n` 分帧），推送 `session/event` 等帧 |
-| 应答 | `POST /api/respond` | 客户端回执 |
+| 认证 | `GET /`（回环地址） | 303 + `set-cookie: dsh-auth-*`（30 天）；之后单次 RPC 与 WebSocket 握手都要带这枚 cookie（缺失/过期 → 客户端自动重登一次并落盘复用）。**必须 `maxRedirects: 0` 才拿得到这枚 cookie**：跟随 303 重定向会丢掉 `set-cookie`，于是后续 RPC 全部 401，在用户视角就是「连不上」（本端已修，见更新记录） |
+| 单次 RPC | `POST /api/<ns>/<method>` | body 为 `client-request` 信封（`{type,rpcId,method,payload:{args:{…}}}`），响应 `server-response`；参数名由描述符决定（`session/list` 要 `_request:{}`，`session/create|prompt|…` 要 `request:{…}`，`agentPresets/list`、`permissionPresets/catalog` 无参） |
+| 指令写入 | `POST /api/commands/execute` | 斜杠指令统一入口（如 `/permission <preset>` 切工作区权限），与网页端同一路径 |
+| 会话列表 | `POST /api/session/list` | 每项的 `cwd` 与 `projections.values.{title,permissions.currentValue,agentPreset}` 就是首页三个选择器的数据源 |
+| 模型目录 | `POST /api/session/modelCatalog` | `{default:{provider,model,reasoningEffort}, routableProviders:[…], groups:[{id,name,models:[…]}]}` → 输入卡右侧模型胶囊的候选（`provider/model`） |
+| 模型选择 | `POST /api/session/selectModel` | `{request:{sessionId, provider, model, reasoningEffort}}`；之后 `session/list` 的 `modelSelection.{lastUsed,next}` 投影回填当前模型 |
+| 事件流 | `ws://<host>/api/remote.mux` | WebSocket：`{type:'open',streamId,endpoint:'session/follow',payload:{args:{request:{address:{kind:'session',sessionId},maxMessages:200,assistantStream:true}}}}`；下行 `item` 帧分 `snapshot`（历史 records + 投影）、`event`（durable，事件名与旧 SSE 一致）、`assistant-stream`（`frame.chunk.type` = `text-delta` / `reasoning-delta`） |
 
-流式输出：`@ohos.net.http` 的 `on('dataReceive')` 事件接收 SSE 分块 → `assistant/chunk` 的 `text-delta` 逐字更新消息（`@Observed` + `@ObjectLink` 增量刷新）。
+流式输出：`@ohos.net.webSocket` 的 `on('message')` 收 `assistant-stream` 增量帧 → `text-delta` 逐字更新消息（`@Observed` + `@ObjectLink` 增量刷新）；断线按指数退避重连并自动重订在跑的会话流（旧版 SSE `/api/events.mux` 与 `agentPreset.list`/`host.describe` 已在 0.1.6 下线）。
+
+### 桌面壳层（菜单栏 / 关于 / 退出确认 / 更新检查）
+
+对齐官方 Electron 桌面端（源码快照见 `desktop-upstream/`）的壳层能力，全部用 ArkTS 原生实现；上游剖析与逐条能力映射见 `docs/DESKTOP-SHELL-UPSTREAM.md` 与 `docs/HARMONY-DESKTOP-PORT.md`：
+
+- **应用菜单栏**：应用 / 编辑 / 视图 / 帮助，结构与顺序来自 `resources/rawfile/desktop-shell.json`（契约），文案为中英双语（与上游 `locale.ts` 逐字对齐）
+- **快捷键**：`Ctrl+W` 关闭（弹确认）、`Ctrl+R` 重连、`F11` 全屏；定义与菜单提示共用一份，不会出现「菜单写着有、实际没绑」
+- **窗口**：几何记忆与恢复（换显示器后自动夹回屏内）、最小 520x600、尺寸变化 400 ms 合并落盘；窗口 API 一律 **px**、落盘一律 **vp**，换算只走 `WindowGeometry.pxFromVp/vpFromPx`
+- **关于面板**：客户端版本 / 适配基线（上游版本）/ 上游提交 / Host 生命周期协议版本 / 契约来源
+- **退出确认**：沿用上游文案，区分「任务会中断」与「定时任务不跑」
+- **更新检查**：读官方同一份 `nightly.yml` feed，10 分钟轮询、失败指数退避封顶 1 小时、±20% 抖动，含 semver（`-rc.N`）比较；**只提示不安装**（详见《限制》）
+- **目录选择**：`DocumentViewPicker` 选文件夹，并发请求合并
 
 ### 构建
 
@@ -394,6 +416,8 @@ node hvigorw.js assembleHap
 ```
 
 可用 DevEco Studio 打开 `client/` 直接运行/签名/部署到鸿蒙电脑（2in1）。
+
+**预构建产物**：未签名 release HAP 挂在 GitHub Releases（[`v1.0.0-pc`](https://github.com/QinpanWan/dsh-harmonyos-pc/releases/tag/v1.0.0-pc)，即上面那份 `client/dist/` 产物）——**自取 + 自行签名侧载**，包内没有 `META-INF/`，不签装不上。
 
 ---
 
@@ -437,6 +461,9 @@ market 里点 GitHub 源插件时（`process.platform === 'openharmony'` 分支�
 - 无法切回 `standard` / `code` / `minimal` 官方 preset（它们依赖被禁用的原生能力，会报 `agent-preset-invalid`）
 - 纯 UI 的 client 插件会变成空壳；WASM 运行时依赖只在调用时崩
 - 侧边栏终端**待上游支持**：0.1.6 新增的 host `dsh-api-terminal-controller` + client `ui-sidebar-terminal` 都依赖 `subprocess` 服务（`@deepseek-ai/dsh-subprocess-local`），而该包顶层静态 `import node-pty`（pty 分配）/ `koffi`（FFI execve）——鸿蒙禁 dlopen 非受信 ELF 且无 openharmony-arm64 预编译包，加载即 `Cannot find the native Koffi module`；`harmony.patch.yml` 已显式禁用这几行（宿主与客户端一起）。待上游提供纯 JS / 独立 pty 实现，或鸿蒙放行原生模块后再启用
+- 鸿蒙桌面壳**不做应用内更新安装**：官方桌面端更新包是 Electron 制品（win-x64/mac-arm64），鸿蒙装不了；`client/` 里的更新检查只负责「上游是否已发布新版本」并引导官网下载，不下载不安装
+- 鸿蒙桌面壳**编辑菜单无法注入按键**：上游 Windows 走 `sendEditingKey()` 把 `Ctrl+Z/Ctrl+C…` 当按键打进编辑器；鸿蒙文本组件自管编辑历史，壳拿不到编辑器句柄，菜单保留条目并提示改用系统快捷键
+- 鸿蒙桌面壳**没有托盘**：上游「关闭 = 进托盘、托盘回窗」在鸿蒙映射为「关闭前确认 + 最小化」，因此「隐藏应用 / 隐藏其他 / 显示全部」三个菜单项统一落到最小化
 
 ---
 
@@ -446,9 +473,102 @@ MIT License，见 [LICENSE](LICENSE)。
 
 本项目不包含 dsh 源码，只含独立编写的配置、补丁脚本与文档。dsh 本身由 [DeepSeek](https://github.com/deepseek-ai/dsh) 以 MIT 许可发布，本仓库对其的引用与补丁使用遵循 MIT 条款，特此致谢。
 
+例外：`desktop-upstream/` 是官方桌面端（`apps/desktop` + `apps/desktop-host`）的**源码快照**，同为 MIT（Copyright (c) 2026 DeepSeek），
+仅作离线查阅与移植对照，不参与任何构建；出处与刷新方式见 `desktop-upstream/README.md`。
+
 ---
 
 ## 更新记录
+
+### 2026-09-26 — 鸿蒙桌面端 HAP 上线 Releases：`v1.0.0-pc` 自取，自行侧载
+
+桌面端不再只躺在本地 `client/dist/`。本次把「扒官方 Electron 壳 → 原生 ArkTS 桌面壳」这一整轮适配的源码并入 `main`
+（`client/` 桌面壳与界面重写、`docs/DESKTOP-SHELL-UPSTREAM.md`、`docs/HARMONY-DESKTOP-PORT.md`、
+`scripts/gen-harmony-ui-assets.mjs` / `gen-client-presets.mjs` / `desktop-shell-check.mjs` / `svg-preview.py`、
+`desktop-upstream/` 官方源码快照），同时把随源码出好的未签名 HAP 挂到 **GitHub Releases**：
+
+- **下载**：[Releases › `v1.0.0-pc`](https://github.com/QinpanWan/dsh-harmonyos-pc/releases/tag/v1.0.0-pc) → 资源 **`dsh-pc-1.0.0-unsigned.hap`**（tag 命名沿用平板端的 `v1.0.0-pad` / `v2.0.0-pad`）
+- **体积 / 校验**：**742,569 B**（`ets/modules.abc` **687,544 B**），sha256 `4a982689f659f8c907e4cb7fc81b455d39d649f7e3a44b3408d9566e4f5605e3`——与 `client/dist/` 及 `~/Download/` 的本地副本逐字节一致
+- **未签名，装机得自己签**：`client/build-profile.json5` 的 `signingConfigs` 为空，包内没有 `META-INF/`（无证书、无 profile）。侧载二选一：
+  - DevEco Studio 打开 `client/` → 登录华为账号 → `File > Project Structure > Signing Configs` 勾「自动签名」→ `Run`（或 `Build > Build Hap(s)` 出签名包后 `hdc install <hap>`）
+  - 已有自己的调试证书：`hapsigntool` 签完再 `hdc install <hap>`
+- **开箱即用**：默认**独立模式**，8 套对话模式与系统提示随包内置（`resources/rawfile/presets.json`），只填 DeepSeek API Key，**不需要本机 dsh 服务**；要连本机/局域网实例再切设置里的「dsh 服务模式」
+- **仍未真机验证**：出包时 `hdc list targets` 为空，真机 UI/交互未跑通；四条已知限制（更新只提示不安装、编辑菜单不注入按键、无托盘、`restartAppHost` 提示到终端）见上文《限制》
+
+### 2026-09-26（第二轮）— 左上角 logo「重影」真因：ArkUI 给每个 `Path` 描两遍边（缺省 `strokeWidth` = 1vp 黑）
+
+主人反馈「左上角 deepseekharness logo **还是**重影、不清晰」。上一轮修的是「同一头鲸鱼画两遍」，这次是**另一个**、
+更底层的原因——品牌几何本来就逐字节来自上游 `BrandWordmark.tsx`，问题出在 ArkUI 的画法：
+`DrawingPainter::DrawPath`（`arkui_ace_engine`）对**每个** `Path` 固定做两遍绘制，`SetPen()` 只在显式
+`strokeWidth(0)` 时才返回 false 跳过一次；不写就当默认值 `STROKE_WIDTH_DEFAULT = 1.0_vp` +
+`GetStrokeValue(Color::BLACK)` ⇒ **先用 brush 填色，再用黑色画笔沿着轮廓再描一圈**。字号越小越致命：
+品牌标只有 30vp 高、"deepseek" 笔画约 2 个 viewBox 单位宽，1vp 黑描边吃掉近一半笔宽 ⇒ 观感就是重影 + 发虚。
+
+- **修法（不是"描边调细"，是关掉第二遍绘制）**：`scripts/gen-harmony-ui-assets.mjs` 给所有填色字形
+  （`emitIcons` 填充分支 + `emitBrand`/`emitBrandFull` 的每个 `Path`）补 `.strokeWidth(0)`；手写的
+  `common/Brand.ets`（`FishMark`）与 `view/InputBar.ets`（发送箭头）同步补上。描边字形本来就有显式
+  `strokeWidth`，不受影响——这也解释了为什么受损的只有品牌字标、HARNESS 徽章里的字、发送箭头和少数实心图标。
+- **防回归**：`scripts/desktop-shell-check.mjs` 新增 3 项（`Icons.ets` 里 `.commands(` 数 == `.strokeWidth(` 数；
+  `Brand.ets`/`InputBar.ets` 每个 `.fill(` 的属性链里必须有 `.strokeWidth`）→ **32/32** 全绿。
+- **自查图**：`scripts/svg-preview.py` 新增 `--scale`（放大看细节）与 `--pen`（复现 ArkUI 的默认黑 pen 第二遍绘制），
+  同一份官方几何渲染两次即见差异 —— `docs/assets/brand-strokeWidth0.png`（现在，干净）vs
+  `docs/assets/brand-arkui-default-pen.png`（修前，笔画外一圈黑 = 重影）。
+- **出包**：release 未签名 HAP **742,569 B**（`ets/modules.abc` **687,544 B**），sha256 `4a982689f659f8c907e4cb7fc81b455d39d649f7e3a44b3408d9566e4f5605e3`，`client/dist/` 与 `~/Download/dsh-harmonyos-client-1.0.0-release-unsigned.hap` 一致；`ark_disasm` 反汇编核对 `strokeWidth(0)` 调用点 **87 处**（85 个填充字形 + `FishMark` + 发送箭头）。真机仍未验证（`hdc list targets` 为空）。
+
+### 2026-09-26 — 鸿蒙桌面端：独立模式开箱即用（内置对话模式）+ 输入行四枚胶囊 + 模型胶囊真菜单 + 品牌重影修复
+
+主人反馈四件事：①「桌面端还是要连本地服务，但连不上」；②「工作区选择与对话模式选择可以放在工作区权限旁边」；③「发送键左边那个对话模式按钮有 bug，点一下直接打开设置」；④「左上角 deepseekharness logo 重影」。逐条落定：
+
+- **连不上的真因 = 登录用 303 拿 cookie 的方式错了**（不是服务没起）。dsh 的 `GET /` 在无 cookie 时回 **303 See Other** + `set-cookie: dsh-auth-*`，带上这枚 cookie 再请求才 200；而 `@ohos.net.http` 默认跟随重定向，跟随后就拿不到那次 `set-cookie` → 后续所有 RPC 401 → 在客户端表现就是「连不上」。修法：`service/DshApiClient.ets` 的 `login()` 加 `maxRedirects: 0`（API 23+；本 SDK **没有** `followRedirects`，实测编译报错），并新增大小写不敏感的 `headerValue()` + `resp.cookies` 兜底。curl 实测链路：`GET /` 303+cookie → 带 cookie `POST /api/session/list` 200 → `ws://…/api/remote.mux` 握手 **101**。
+- **独立模式（`direct`）真·开箱即用**：新增 `scripts/gen-client-presets.mjs`（零依赖、带 `--check`）从仓库 `presets/*/{preset.yml,agent.cordis.yml}` 生成 `rawfile/presets.json`（8 套模式的 id / 中文产品名 / 说明 / persona 系统提示），随 HAP 分发；新增 `common/PresetCatalog.ets` 读取（读不到回落 `Constants.BUILTIN_PRESETS`，绝不阻塞启动）。独立模式下对话模式胶囊列的就是这 8 套内置模式，选中即作为每次请求的 `system` 提示（`{{model}}`/`{{cwd}}` 占位会替换）——**不需要 dsh 服务，也不需要服务端 `agentPresets/list`**。设置面板里独立模式新增「接口地址」（默认 `https://api.deepseek.com/v1`，OpenAI 兼容），API Key + 模型 + 地址三者只存本机；文案统一为「独立模式（内置，开箱即用）」/「dsh 服务模式」。
+- **四枚选择器并排进输入行**（主人点名）：`view/InputBar.ets` 工具排改为 Flex 换行 —— `+` 圆 → **工作区权限** → **工作区** → **对话模式**；原先挂在 hero 卡上方的 `heroWorkspaceRow()`（工作区 + 对话模式两枚）整体删除，`view/ChatView.ets` 相应精简。三枚胶囊保留「不可用不隐藏、只置灰 + 写清原因 + 菜单里留『切换到 dsh 服务模式…』」的既有约定。
+- **修掉「对话模式按钮点一下直接开设置」**：那是模型胶囊（`conversation.input.model` 座位）被误接到 `onOpenModelSettings` 上。现在它是真 `bindMenu(modelMenu())`：候选列表打 ✓ 标当前，选中即切（独立模式改本地并保存；dsh 服务模式走 `session/selectModel` + 刷新会话列表）；设置入口降级成菜单**末行**的「模型与 API Key…」/「模型与连接设置…」。模型候选：独立模式 = 内置模型 id，dsh 服务模式 = `session/modelCatalog` 的 `provider/model`（新增 `DshApiClient.modelCatalog()` / `selectModel()`，并让 `session/list` 的 `modelSelection` 投影回填当前模型，`modelLabel()` 不再拿预设冒充模型）。
+- **左上角 logo 重影 = 同一头鲸鱼画了两遍**：生成器原先取 `includeMark=true` 的 182 宽字标（自带鲸鱼），`view/Sidebar.ets` 品牌排又另画了一个 `FishMark`。修法：`scripts/gen-harmony-ui-assets.mjs` 改为 `parseBrandParts()`，输出两个 @Builder —— `IconBrandWordmark`（viewBox `26 0 156 24`，只有「DeepSeek HARNESS」+ 反色徽章）与 **`IconBrandFull`**（viewBox `0 0 182 24`，鲸鱼 + 字标一体）；侧栏品牌排改用**单幅** `IconBrandFull`，折叠轨道仍只用 `FishMark`（那里本来就只画鲸鱼，不是重影）。隐藏系统装饰栏时品牌排整排不渲染（`hideBrand`），避免和自绘菜单栏打架。**⚠️ 这条只解决"鲸鱼出现两次"；主人装机后仍报"重影不清晰"，真因是 ArkUI 给每个 `Path` 多描了一遍默认黑边 —— 见上一条 2026-09-26（第二轮）。**
+- **出包**：release 未签名 HAP **739,841 B**（`ets/modules.abc` **684,816 B**），sha256 `2aa4ddc73d58dd12b8f9ba7c2ab678931af0a4910b9f135eafb274f1b6159774`，`client/dist/` 与 `~/Download/dsh-harmonyos-client-1.0.0-release-unsigned.hap` 一致。校验：`desktop-shell-check.mjs` 29/29、`gen-harmony-ui-assets.mjs --check` 5/5（令牌 181 · 字形 94）、`gen-client-presets.mjs --check` 通过、ArkTS 零错误（仅剩 1 条已知无害 WARN），并核对包内含 `rawfile/presets.json` 与新增文案。**真机仍未验证**（`hdc list targets` 为空）。
+
+### 2026-09-26 — 首页会话入口修复：工作区选择 / 工作区权限 / 对话模式，输入卡只留一张
+
+主人反馈「首页有两个对话输入口，没有工作区选择按钮，没有工作区权限选择，对话模式也选不了」。四个问题同源：上游的会话入口三件套（工作区胶囊、权限胶囊、对话模式胶囊）**全挂在 hero（空会话）相位**，而鸿蒙端只抄了 hero 的标题，把三个选择器丢了，还在列尾常驻了第二张输入卡。
+
+- **根因**：① `view/ChatView.ets` 的 hero 相位渲染了一张 `InputBar`、列尾又常驻一张 → 空会话时同屏两张；② 旧「工作区行」只是一枚调 `pickWorkspaceDirectory()` 的死按钮，没有任何选择；③ 权限只是被动文本、对话模式也是被动文本（`agentPresets/list` / `permissionPresets/catalog` 根本没接）。
+- **对齐上游**（真源 `ui-conversation/src/client/skeleton/{ConversationContent,InputBar,EmptyHero}.tsx` + `ConversationRoot.module.css`）：全列**唯一**输入卡（`composer(true|false)`，hero 相位 = hero chrome + 工作区行 + 卡，有消息 = 正文 + 同一张卡；全客户端只剩一处 `TextArea`）；`heroWorkspaceRow` = 工作区胶囊（`bindMenu` 列会话 `cwd` +「选择文件夹…」→ `DocumentViewPicker`，标签取目录末段）+ 对话模式胶囊（菜单列 `agentPresets/list` 并剔除 `broken`，首个回合后锁定）。
+- **工作区权限胶囊**（上游 `conversation.input.permission` / `ui-permission-presets` 的 `PermissionSelect`）：输入卡工具排里，权限字形 + 显示名 + chevron，菜单取自 `permissionPresets/catalog`，写入走 `commands/execute` 的 `/permission <preset>`（与网页端同一路径）；`danger-full-access` / `auto` 先弹**风险确认**（自绘 `DesktopPermissionRiskPanel`，逐条沿用上游 `RiskConfirmation` 文案，勾选「我已了解风险」才能启用）。
+- **显示名规则**（`Constants.permissionLabel()`，对应上游 `displayPermissionPreset`）：`read-only`→仅可查看、`workspace-write`→工作区内修改、`danger-full-access`→完全权限、`auto`→`Auto review`（+ `EXP` 上标）；其余部署名按上游 `displayPresetName` 转 Title Case。**机器值只用于菜单比对与写协议**，显示名绝不回写。
+- **协议侧更新**（0.1.6 typert gateway，本机实测）：`/api/events.mux`（SSE）与 `agentPreset.list`/`host.describe` 已下线 → 改为 cookie 登录（`GET /` 回环拿 `dsh-auth-*`，落盘复用 + 401 自动重登一次）+ WebSocket `/api/remote.mux`（`session/follow`：`snapshot` / `event` / `assistant-stream` 三类下行帧，断线指数退避重连并重订在跑的流）+ `agentPresets/list`、`permissionPresets/catalog`、`commands/execute`。
+- **直连模式**：内置 DeepSeek API 下没有工作区/权限概念 —— 权限胶囊置灰并写清原因，工作区/对话模式菜单顶部加一行禁用说明，三个菜单里都放一条可点的「切换到 dsh 服务模式…」（等价于设置里的连接模式切换），入口不隐藏、也不留死路。
+- **出包**：release 未签名 HAP **660,589 B**（`ets/modules.abc` **638,368 B**），`client/dist/` 与 `~/Download/dsh-harmonyos-client-1.0.0-release-unsigned.hap` 各一份。校验：`gen-harmony-ui-assets.mjs --check` 5/5（令牌 181 · 字形 94）、`desktop-shell-check.mjs` 29/29、ArkTS 零错误（仅剩 1 条已知无害 WARN），并核对包内 `ets/modules.abc` 含新增文案。**真机仍未验证**（`hdc list targets` 为空）。
+- 同日更早的两处小 bug（窗口几何 px/vp 混用、「窗口拖不小」；左上角品牌标偏小 + 鲸鱼画两遍）记录在本节下面 2026-09-25 条目末尾。
+
+### 2026-09-25 — 鸿蒙桌面端适配：扒官方 Electron 壳源码 + 原生 ArkTS 桌面壳落地
+
+官方桌面端（`deepseek-ai/deepseek-harness` 的 `apps/desktop`）是 Electron 薄壳，鸿蒙装不了（发布目标只有 mac/win，且 Electron/`koffi`/`node-pty` 在鸿蒙全部加载不了）。本次把它**拆开对照**，再用 ArkTS 把壳层重写一遍：
+
+- **源码归档**：新增 `desktop-upstream/`（`apps/desktop` + `apps/desktop-host`，456 文件 / 6.2 MB，MIT），记录仓库、分支（`master`，不是 `main`）、提交 `477b4f42`、版本 `0.1.7-rc.2`、抓取时间与一键刷新命令；含上游 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
+- **架构剖析**：新增 `docs/DESKTOP-SHELL-UPSTREAM.md` —— 进程模型（壳 / 渲染进程 / RunAsNode Host / 内置浏览器视图）、`dsh-app://app/` 协议与 cookie 转发认证、端口 19387 与 `$DSH_HOME/profiles/desktop` 独占、25 条 IPC 面、菜单与右键菜单、`keybindings.json` 设备级偏好、自更新状态机与 10 min/1 h/±20% 调度、崩溃与恢复面，并给出「哪些能移植」的结论。
+- **适配落地**（`client/`，全部为新增文件，未改动既有聊天链路）：
+  - `desktop/DesktopShellContract.ets` + `resources/rawfile/desktop-shell.json`：把上游写死的常量（窗口 1280x820/最小 520x600、更新 600000 ms/3600000 ms/0.2、端口、协议版本、菜单树、快捷键表）变成**单一事实来源**，运行时读取，读失败回落内置默认值并说明原因。
+  - `desktop/WindowGeometry.ets` + `entryability/EntryAbility.ets`：窗口几何记忆与恢复（夹回屏内）、`setWindowLimits` 最小尺寸、400 ms 合并落盘；用 `windowStage.on('windowStageClose')` 拦截关闭 → 页面确认 → `terminateSelf()`，未就绪时不拦截（不会把窗口卡死）。
+  - `view/DesktopMenuBar.ets`：自绘应用菜单栏 + 下拉层（结构取自契约，快捷键提示由 `ShortcutRegistry` 生成，避免「菜单写着 Ctrl+W 其实没绑」）。`Ctrl+W` 关闭确认、`Ctrl+R` 重连、`F11` 全屏走 `keyboardShortcut()`。
+  - `view/DesktopDialogs.ets`：关于面板（客户端版本/适配基线/上游提交/Host 协议版本/契约来源）、退出确认（沿用上游「任务会中断 / 定时任务不跑」两套文案）、更新面板（同一状态机文案 + 技术详情）。
+  - `service/DesktopUpdateService.ets` + `desktop/UpdateFeed.ets` + `desktop/UpdateSchedule.ets`：读**同一份**官方 feed（`dsh-desk/feeds/<target>/nightly.yml`）、自己实现 semver 比较（含 `-rc.N` 预发布规则）、逐条照搬上游调度语义（完成才计周期、手动与自动合并同一次飞行请求、失败指数退避 + 抖动、`dispose` 后不重排）；只做「发现新版本」，安装引导到官网。
+  - `desktop/DesktopDirectoryPicker.ets`：`DocumentViewPicker` 文件夹选择，并发请求合并成一次（对应上游 `WeakMap` 去重）。
+  - `desktop/ShortcutRegistry.ets` + `desktop/DesktopPrefs.ets`：设备级快捷键偏好（默认定义 + 覆盖 + revision 单写者快照）与统一偏好存储。
+- **防漂移**：新增 `scripts/desktop-shell-check.mjs`（零依赖，`node scripts/desktop-shell-check.mjs`），把「契约 ↔ 上游源码快照 ↔ ArkTS 实现（文案字段/标签解析/菜单分发/契约读取/**窗口几何单位**）」对起来，当前 **29/29 通过**；负向测试（故意改坏 `defaultWidth`、或把 `resize()` 的实参换回裸 vp）都能精确指认并 exit 1。
+- **构建**：`sh ~/bin/deveco-api26.sh ~/dsh-harmonyos-pc/client assembleHap` —— **编译通过**（ArkTS 零错误），产出未签名 HAP（真机安装需 DevEco 配签名）。
+- **未签名 HAP 出包**：`client/build-profile.json5` 的 `signingConfigs` 为空数组，hvigor 走到 `SignHap` 只印 `WARN: No signingConfig found for product default` 就跳过 —— 所以产物**天然未签名**（包内无 `META-INF/`、无证书/profile）。清缓存全量 **release** 构建（34 tasks / 15 s）得 `entry-default-unsigned.hap` **284,192 B**（`ets/modules.abc` 271,972 B，含契约 `resources/rawfile/desktop-shell.json` 与 `pack.info`），另存 `client/dist/dsh-harmonyos-client-1.0.0-release-unsigned.hap` 与 `~/Download/` 各一份，sha256 `0ba5bbe388a76d3b09fd5f56e03bf3d1c10e1ff00b183b6e5bdf854c72f0b77e`；debug（不混淆、带 sourcemap）同命令去掉 `-p buildMode=release` 为 660,742 B。
+- **UI 复刻（全部取上游开源实现，不闭门造车）**：新增 `scripts/gen-harmony-ui-assets.mjs` 作为**唯一生成器**（`node scripts/gen-harmony-ui-assets.mjs` 生成、`--check` 校验生成结果与磁盘一致、`--upstream`/`DSH_UPSTREAM` 换源码根），直接把上游客户端的设计真源编成 ArkTS：
+  - `common/Tokens.ets` —— `packages/client/ui-theme/src/styles/design-platform.css` 的 **181 项 `--dsw-*` 令牌**（浅色 `body` / 深色 `body[data-ds-dark-theme]` 两套，生成时递归解析 `var()` 与 `color-mix(in srgb)`）；
+  - `common/Icons.ets` —— `ui-primitives/src/icons/{index,shared-artwork,PermissionIcon}.tsx` 的 **94 个字形**（含权限三枚 `PermissionIcon*`）逐条转成 `Shape` + `Path.commands`（viewPort 缩放 ⇒ 运行时上色、随深浅色切换；不再用只能静态着色的 `Image($r('app.media.*'))`），另含官方鲸鱼 `FISH_LOGO_PATH` 与 `BrandWordmark` 字标（含 HARNESS 反色徽章）；
+  - `common/Theme.ets` —— 尺寸/节奏常量逐条对齐 `ui-theme/base.css`、`apps/desktop/src/windows-layout.ts` 与各组件 `*.module.css`（标题栏 40、菜单 28/内边距 10/圆角 6/起始 x 48（收起 84）、侧栏 280↔56、会话头 76、输入卡圆角 28 上限「列宽+32」、气泡圆角 20 内边距 10/16、会话行 32/工作区行 34、设置面板 800×800 + 188 导航…），不发明新的视觉值；
+  - 视图层重写：自绘 Windows 标题栏（左端 x=12 的开合控制盒 + 收起时 x=48 的新建会话，与上游 `preload-menu.ts` 内联 CSS 同一套几何）、三栏骨架（主列左上 16 圆角）、侧栏（品牌排 40 / 品牌鲸鱼+字标 30 / 新建会话 38 / 会话行 32 / 设置入口 42）、空会话 HeroShell（鲸鱼 34 + 26/32 标题 + 预览徽章）、输入卡与消息气泡、设置面板（外观立方 / 字号 stepper）；应用图标、入口图标与启动图统一改为上游 `apps/desktop/resources/icon-windows.svg`（生成时剥掉 `filter`、把 `linearGradient` 折成实色、把 `transform` 烘焙进坐标 —— ArkUI 的 SVG 解析对这三样都不保证），原来的手绘占位图已删除。
+  - 顺带修掉两个真问题：① 深浅色/字号原先只写进 AppStorage 而**没人订阅**（`Theme.palette()` 直读 AppStorage 不建立依赖）→ 各组件改成 `Theme.palette(this.dark)` 显式吃 `@StorageProp`，页面用 `@State dark`，并由 `EntryAbility.onConfigurationUpdate` → eventHub 驱动「跟随系统」即时生效；② 侧栏品牌排的折叠开关原本是**常亮**的 hover 填充方块，改为默认透明 + 悬停填充，并补回上游各排/菜单项的 hover 反馈。
+  - 重新出包：release 未签名 HAP **595,373 B**，sha256 `a83adf27c72ecec1e96d0221ee857694847da134035c4bdad7d64a6dbe9f963e`（`client/dist/` 与 `~/Download/` 各一份；体积增长来自 181 项令牌 + 94 个字形 + 官方 1024 图标矢量数据）。
+- **顺带修掉的构建阻塞**：`module.json5` 新增 `definePermissions` 显式声明 `ohos.permission.USE_AI`（`system_grant`/`system_basic`）。HarmonyOS 26(API 26) SDK 的预定义权限表里没有 `USE_AI`，`PreBuild` 直接报 `00303221`；声明后构建通过，权限语义与官方定义一致（仍需 `system_basic` APL 签名才会真正授予）。
+- **限制**：鸿蒙端的更新**只发现不安装**、编辑菜单**不注入按键**、**没有托盘**（关闭→确认+最小化）、`restartAppHost` 改为提示到终端重启 —— 四条均已写进上文《限制》章节。
+- **主人反馈的两处小 bug（2026-09-26 修）**：
+  - **「窗口无法缩小」= 窗口几何单位混用**。官方文档（`arkts-apis-window-Window.md` / `arkts-apis-window-i.md`）明确：`resize()`/`resizeAsync()`/`moveWindowTo()` 的参数、`getWindowProperties().windowRect`、`windowSizeChange` 回调的 `Size`、`WindowLimits` 的 min/maxWidth/Height **全部是 px**（只有 API 22/23 的 `SizeInVP`/`RectInVP`/`getWindowLimitsVP` 才是 vp）。原实现把「px 当 vp」的几何值又当 px 传给 API → 每次重启窗口都按 `density` 缩一半、最小尺寸夹住后永久停在 520x600（用户视角 = 拖不小、位置还会往左上角漂）。修法：落盘/解析/夹取一律 vp，调用窗口 API 时统一走 `WindowGeometry.pxFromVp(vp, density)`，`persistGeometry()` 用 `fromPixelRect()` 换算；落盘格式加 `v:2` 版本号，旧格式（px/vp 混用期的脏数据）整条丢弃回默认几何，不再靠猜。同时 `setWindowLimits` 的 min 取「契约最小值 vs 显示器可视区」的较小者、max 取显示器，保证窗口永远留在屏内可拖。
+  - **左上角 logo 偏小 + 一头鲸鱼画两遍**。上游 `SidebarRoot` 给 `sidebar.brand.mark` 的 size 是 24，而官方插件 `ui-brand-official` 用的是 `BrandWordmark includeMark={false}`（viewBox `26 0 156 24`，只有「DeepSeek HARNESS」字标）；生成器原先取了 `includeMark=true` 的 182 宽版本，于是 `FishMark` 与字标自带的鲸鱼**同时出现**。修法：生成器改为先剥 `<defs>`、再剥字标里那组带 `dsh-wordmark-whale-clip` 的鲸鱼，输出 `viewPort {26,0,156,24}`、宽度 `size*156/24`；`Theme.BRAND_MARK_SIZE`/`BRAND_NAME_HEIGHT` 按反馈从上游 24 放大到 **30**（品牌排 40 高留 10 留白，锁排宽 30+8+195+4=237 ≤ 侧栏可用 252，32 就正好贴边故为上限）。
+  - 出包：release 未签名 HAP **598,357 B**（`ets/modules.abc` 576,136 B），sha256 `d1cef772a8bd9e9b15fdb357edb57164fbd06365663cce359b0fc5361556d3d6`（HAP 是 zip、包内文件带 mtime，**同源码两次构建 sha 不同**，只比对体积），`client/dist/` 与 `~/Download/` 各一份。校验：`gen-harmony-ui-assets.mjs --check` 5/5、`desktop-shell-check.mjs` 29/29、ArkTS 仅剩 1 条已知无害 WARN。**真机仍未验证**（`hdc list targets` 为空）。
 
 ### 2026-09-16 — 修「历史会话带 reasoning 块 → messages 协议整轮失败」
 

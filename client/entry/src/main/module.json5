@@ -10,6 +10,18 @@
     ],
     "deliveryWithInstall": true,
     "installationFree": false,
+    // 自定义权限声明：ohos.permission.USE_AI 在 HarmonyOS 26(API 26) SDK 的预定义权限表中不存在，
+    // 但它在设备侧（HarmonyOS 6.x）是真实存在、且需要 system_basic APL 签名的权限。
+    // 这里按构建器要求显式声明，语义对齐官方定义（系统授权、system_basic、需 Profile 授权）。
+    "definePermissions": [
+      {
+        "name": "ohos.permission.USE_AI",
+        "grantMode": "system_grant",
+        "availableLevel": "system_basic",
+        "provisionEnable": true,
+        "distributedSceneEnable": false
+      }
+    ],
     "pages": "$profile:main_pages",
     "abilities": [
       {

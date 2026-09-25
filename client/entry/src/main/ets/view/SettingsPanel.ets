@@ -1,13 +1,23 @@
 /**
- * SettingsPanel：设置面板（右侧抽屉内容）。
- *
- * 支持两种连接模式：
- * - 内置直连（direct，默认）：不依赖 dsh 服务端，填 DeepSeek API Key 即用（WorkBuddy 式打开即用）
- * - dsh 服务（dsh）：对接本机/局域网 dsh，含服务端模型配置（settings.update）、预设、服务地址
+ * SettingsPanel：设置。对齐上游开源实现
+ * packages/client/ui-settings-general/src/client/SettingsRoot.module.css：
+ * 800x800 面板（圆角 28 / --dsw-alias-bg-layer-2 / elevation-prominent）、
+ * 左侧 188 导航（标题 16/24 + 导航格 40 高圆角 12）、右侧内容（头 54 + 选项区 24 内边距）。
+ * 行样式取自 ui-theme 的 AppearanceRow（外观立方 20/32 内边距 + 圆角 20）
+ * 与 FontSizeRow（ステッパー 72x36 圆角 12），文案遵循 zh 语言表。
  */
-import { Theme } from '../common/Theme';
+import { Constants } from '../common/Constants';
+import { Theme, Appearance } from '../common/Theme';
 import { DshApiClient } from '../service/DshApiClient';
+import {
+  IconPersonalizationOutline, IconApiOutline, IconCloseOutline, IconLightOutline,
+  IconDarkOutline, IconFollowsystemOutline, IconChevronUpOutline, IconChevronDownOutline,
+} from '../common/Icons';
 import { BusinessError } from '@kit.BasicServicesKit';
+
+/** 导航区块。 */
+const SECTION_GENERAL: number = 0;
+const SECTION_MODELS: number = 1;
 
 @Component
 export struct SettingsPanel {
@@ -20,17 +30,29 @@ export struct SettingsPanel {
   @Prop directApiKey: string = '';
   @Prop directModel: string = 'deepseek-chat';
   @Prop directModels: string[] = [];
+  /** 独立模式接口地址（OpenAI 兼容端点，默认官方 DeepSeek） */
+  @Prop directBaseUrl: string = '';
+  @Prop appearance: string = Appearance.SYSTEM;
+  @Prop contentFontSize: number = 14;
+  @Prop appVersion: string = '';
+  @Prop baselineVersion: string = '';
   client: DshApiClient | null = null;
   onModeChange: (mode: string) => void = () => {};
-  onSaveDirect: (key: string, model: string) => void = () => {};
+  onSaveDirect: (key: string, model: string, baseUrl: string) => void = () => {};
   onSave: (url: string) => void = () => {};
   onPresetSelect: (preset: string) => void = () => {};
+  onAppearanceChange: (appearance: string) => void = () => {};
+  onFontSizeChange: (size: number) => void = () => {};
   onClose: () => void = () => {};
+  /** 订阅深浅色：palette(this.dark) 才会在切换外观时重建本组件。 */
+  @StorageProp('dshDarkTheme') dark: boolean = true;
+  @State section: number = SECTION_GENERAL;
   @State urlInput: string = '';
   @State presetIndex: number = 0;
   @State presetOptions: SelectOption[] = [];
   @State modeIndex: number = 0;
   @State directKeyInput: string = '';
+  @State directBaseInput: string = '';
   @State directModelIndex: number = 0;
   // —— dsh 服务端模型配置状态 ——
   @State providerName: string = '';
@@ -50,6 +72,7 @@ export struct SettingsPanel {
     this.rebuildPreset();
     this.modeIndex = this.mode === 'dsh' ? 1 : 0;
     this.directKeyInput = '';
+    this.directBaseInput = this.directBaseUrl.length > 0 ? this.directBaseUrl : Constants.DIRECT_BASE_URL;
     this.directModelIndex = 0;
     for (let i = 0; i < this.directModels.length; i++) {
       if (this.directModels[i] === this.directModel) {
@@ -90,19 +113,20 @@ export struct SettingsPanel {
     return opts;
   }
 
-  /** 保存直连配置（API Key + 模型），回调 Index 持久化到本地 */
+  /** 保存独立模式配置（API Key + 模型 + 接口地址），回调 Index 持久化到本地 */
   private saveDirect(): void {
-    const key: string = this.directKeyInput.trim();
-    if (key.length === 0) {
-      return;
-    }
+    const key: string = this.directKeyInput.trim().length > 0 ? this.directKeyInput.trim() : this.directApiKey;
     let model: string = this.directModel;
     if (this.directModelIndex >= 0 && this.directModelIndex < this.directModels.length) {
       model = this.directModels[this.directModelIndex];
     }
-    this.onSaveDirect(key, model);
+    const base: string = this.directBaseInput.trim().length > 0
+      ? this.directBaseInput.trim() : Constants.DIRECT_BASE_URL;
+    this.onSaveDirect(key, model, base);
     this.directKeyInput = '';
-    this.modelStatus = '直连配置已保存（API Key 存于本机）';
+    this.modelStatus = key.length > 0
+      ? '独立模式配置已保存（API Key 存于本机）'
+      : '已保存模型与接口地址；还差 API Key 才能开聊';
   }
 
   /**
@@ -238,334 +262,445 @@ export struct SettingsPanel {
 
   build() {
     Column() {
-      // 固定头部（轻玻璃 + 底部细光边）
       Row() {
-        Text('设置')
-          .fontSize(17)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(Theme.COLOR_TEXT)
-        Blank()
-        Button('✕')
-          .width(34)
-          .height(34)
-          .fontSize(15)
-          .fontColor(Theme.COLOR_SUBTEXT)
-          .backgroundColor(Theme.GLASS_INPUT)
-          .borderRadius(17)
-          .border({ width: 1, color: Theme.GLASS_BORDER })
-          .onClick(() => {
-            this.onClose();
-          })
-      }
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 16, bottom: 10 })
-      .border({ width: { bottom: 1 }, color: Theme.GLASS_BORDER })
-      .backgroundColor(Theme.GLASS_HEADER)
-
-      // 可滚动内容区
-      Scroll() {
-        Column({ space: 16 }) {
-          // —— 连接模式 ——
-          Text('连接模式')
+        // —— 左侧导航（188 宽 / 22 上内边距 / 标题 16-24 / 格 40 高圆角 12）——
+        Column({ space: 18 }) {
+          Text('设置')
             .fontSize(16)
+            .lineHeight(24)
             .fontWeight(FontWeight.Medium)
-            .fontColor(Theme.COLOR_TEXT)
+            .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
             .width('100%')
-          Select([{ value: '内置直连（打开即用）' }, { value: 'dsh 服务' }])
-            .selected(this.modeIndex)
-            .value(this.mode === 'dsh' ? 'dsh 服务' : '内置直连（打开即用）')
-            .font({ size: 14 })
-            .fontColor(Theme.COLOR_TEXT)
-            .selectedOptionFont({ size: 14 })
-            .optionFont({ size: 14 })
-            .backgroundColor(Theme.GLASS_INPUT)
-            .borderRadius(10)
-            .border({ width: 1, color: Theme.GLASS_BORDER })
-            .onSelect((index: number, value: string) => {
-              this.modeIndex = index;
-              this.onModeChange(index === 1 ? 'dsh' : 'direct');
-              if (index === 1) {
-                this.loadModelConfig();
-              }
-            })
-
-          // —— 对话模式预设（两种模式下都可用；直连模式先选好，切回 dsh 模式时生效） ——
-          Column({ space: 6 }) {
-            Text('默认对话模式（鸿蒙 harmony-* 六套预设）')
-              .fontSize(12)
-              .fontColor(Theme.COLOR_SUBTEXT)
-              .width('100%')
-            if (this.presetIds.length > 0) {
-              Select(this.presetOptions)
-                .selected(this.presetIndex)
-                .value(this.currentPreset.length > 0 ? this.currentPreset : '（使用部署默认）')
-                .font({ size: 14 })
-                .fontColor(Theme.COLOR_TEXT)
-                .selectedOptionFont({ size: 14 })
-                .optionFont({ size: 14 })
-                .backgroundColor(Theme.COLOR_SURFACE)
-                .borderRadius(10)
-                .onSelect((index: number, value: string) => {
-                  this.presetIndex = index;
-                  if (index >= 0 && index < this.presetIds.length) {
-                    this.onPresetSelect(this.presetIds[index]);
-                  }
-                })
-            } else {
-              Text('（预设列表不可用）')
-                .fontSize(12)
-                .fontColor(Theme.COLOR_SUBTEXT)
-                .width('100%')
-            }
-            Text('内置六套 · 切换后新建对话立即生效（dsh 服务模式）')
-              .fontSize(11)
-              .fontColor(Theme.COLOR_SUBTEXT)
-              .width('100%')
+            .padding({ left: 12 })
+          Column({ space: 4 }) {
+            this.navCell(SECTION_GENERAL, '通用设置', 0)
+            this.navCell(SECTION_MODELS, '模型与连接', 1)
           }
           .width('100%')
-
-          if (this.mode === 'direct') {
-            // —— 内置直连配置（WorkBuddy 式打开即用） ——
-            Text('直连配置')
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(Theme.COLOR_TEXT)
-              .width('100%')
-            Column({ space: 6 }) {
-              Text('DeepSeek API Key（保存于本机）')
-                .fontSize(12)
-                .fontColor(Theme.COLOR_SUBTEXT)
-                .width('100%')
-              TextInput({ text: this.directKeyInput, placeholder: 'sk-…' })
-                .width('100%')
-                .height(44)
-                .fontSize(14)
-                .type(InputType.Password)
-                .fontColor(Theme.COLOR_TEXT)
-                .placeholderColor(Theme.COLOR_SUBTEXT)
-                .backgroundColor(Theme.COLOR_SURFACE)
-                .borderRadius(10)
-                .onChange((value: string) => {
-                  this.directKeyInput = value;
-                })
-              if (this.directModels.length > 0) {
-                Select(this.buildDirectModelOptions())
-                  .selected(this.directModelIndex)
-                  .value(this.directModel)
-                  .font({ size: 14 })
-                  .fontColor(Theme.COLOR_TEXT)
-                  .selectedOptionFont({ size: 14 })
-                  .optionFont({ size: 14 })
-                  .backgroundColor(Theme.COLOR_SURFACE)
-                  .borderRadius(10)
-                  .onSelect((index: number, value: string) => {
-                    this.directModelIndex = index;
-                  })
-              }
-              Button('保存直连配置')
-                .width('100%')
-                .height(40)
-                .fontSize(14)
-                .backgroundColor(Theme.COLOR_PRIMARY)
-                .fontColor(Color.White)
-                .borderRadius(10)
-                .onClick(() => {
-                  this.saveDirect();
-                })
-              if (this.modelStatus.length > 0) {
-                Text(this.modelStatus)
-                  .fontSize(12)
-                  .fontColor(Theme.COLOR_WARNING)
-                  .width('100%')
-              }
-            }
-            .width('100%')
-            .padding(12)
-            .backgroundColor(Theme.GLASS_INPUT)
-            .borderRadius(12)
-            .border({ width: 1, color: Theme.GLASS_BORDER })
-          } else {
-            // —— dsh 服务模式 ——
-            Text('服务器连接')
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(Theme.COLOR_TEXT)
-              .width('100%')
-
-            Column({ space: 6 }) {
-              Text('dsh 服务地址')
-                .fontSize(12)
-                .fontColor(Theme.COLOR_SUBTEXT)
-                .width('100%')
-              TextInput({ text: this.urlInput, placeholder: 'http://127.0.0.1:3080' })
-                .width('100%')
-                .height(44)
-                .fontSize(14)
-                .fontColor(Theme.COLOR_TEXT)
-                .placeholderColor(Theme.COLOR_SUBTEXT)
-                .backgroundColor(Theme.COLOR_SURFACE)
-                .borderRadius(10)
-                .onChange((value: string) => {
-                  this.urlInput = value;
-                })
-              Text('· 本机使用：http://127.0.0.1:3080\n· 局域网使用：http://<鸿蒙电脑IP>:3080\n· 先运行 sh ~/bin/dsh-web.sh 启动服务')
-                .fontSize(11)
-                .fontColor(Theme.COLOR_SUBTEXT)
-                .lineHeight(17)
-                .width('100%')
-            }
-            .width('100%')
-
-            // —— 服务端模型配置 ——
-            Text('模型配置')
-              .fontSize(16)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(Theme.COLOR_TEXT)
-              .width('100%')
-
-            Column({ space: 6 }) {
-              Row({ space: 8 }) {
-                Text(this.providerName.length > 0 ? this.providerName : '正在检测提供商…')
-                  .fontSize(14)
-                  .fontColor(Theme.COLOR_TEXT)
-                  .layoutWeight(1)
-                if (this.providerActive) {
-                  Text('在线').fontSize(11).fontColor(Theme.COLOR_SUCCESS)
-                } else if (this.providerName.length > 0) {
-                  Text('离线').fontSize(11).fontColor(Theme.COLOR_ERROR)
-                }
-                if (this.apiKeySet) {
-                  Text('✓ Key 已配置').fontSize(11).fontColor(Theme.COLOR_SUCCESS)
-                } else if (this.providerName.length > 0) {
-                  Text('✗ 未配置 Key').fontSize(11).fontColor(Theme.COLOR_WARNING)
-                }
-              }
-              .width('100%')
-
-              TextInput({ text: this.apiKeyInput, placeholder: 'DeepSeek API Key（sk-…）' })
-                .width('100%')
-                .height(44)
-                .fontSize(14)
-                .type(InputType.Password)
-                .fontColor(Theme.COLOR_TEXT)
-                .placeholderColor(Theme.COLOR_SUBTEXT)
-                .backgroundColor(Theme.COLOR_SURFACE)
-                .borderRadius(10)
-                .onChange((value: string) => {
-                  this.apiKeyInput = value;
-                })
-              Button('保存 API Key')
-                .width('100%')
-                .height(38)
-                .fontSize(14)
-                .backgroundColor(Theme.GLASS_INPUT)
-                .fontColor(Theme.COLOR_TEXT)
-                .borderRadius(10)
-                .border({ width: 1, color: Theme.GLASS_BORDER })
-                .onClick(() => {
-                  this.saveApiKey();
-                })
-
-              if (this.modelIds.length > 0) {
-                Select(this.modelOptions)
-                  .selected(this.modelIndex)
-                  .value(this.currentModel.length > 0 ? this.currentModel : '选择模型')
-                  .font({ size: 14 })
-                  .fontColor(Theme.COLOR_TEXT)
-                  .selectedOptionFont({ size: 14 })
-                  .optionFont({ size: 14 })
-                  .backgroundColor(Theme.COLOR_SURFACE)
-                  .borderRadius(10)
-                  .onSelect((index: number, value: string) => {
-                    this.modelIndex = index;
-                  })
-                Button('保存模型')
-                  .width('100%')
-                  .height(38)
-                  .fontSize(14)
-                  .backgroundColor(Theme.COLOR_SURFACE_HOVER)
-                  .fontColor(Theme.COLOR_TEXT)
-                  .borderRadius(10)
-                  .onClick(() => {
-                    this.saveModel();
-                  })
-              }
-
-              if (this.modelStatus.length > 0) {
-                Text(this.modelStatus)
-                  .fontSize(12)
-                  .fontColor(Theme.COLOR_WARNING)
-                  .width('100%')
-              }
-            }
-            .width('100%')
-            .padding(12)
-            .backgroundColor(Theme.GLASS_INPUT)
-            .borderRadius(12)
-            .border({ width: 1, color: Theme.GLASS_BORDER })
-
-            // —— 连接状态 + 保存重连 ——
-            Row({ space: 8 }) {
-              Circle({ width: 8, height: 8 })
-                .fill(this.connected ? Theme.COLOR_SUCCESS : Theme.COLOR_ERROR)
-              Text('状态：' + this.statusText)
-                .fontSize(13)
-                .fontColor(Theme.COLOR_TEXT)
-            }
-            .width('100%')
-
-            Button('保存并重连')
-              .width('100%')
-              .height(42)
-              .fontSize(15)
-              .backgroundColor(Theme.COLOR_PRIMARY)
-              .fontColor(Color.White)
-              .borderRadius(10)
-              .onClick(() => {
-                this.onSave(this.urlInput.trim());
-                this.onClose();
-              })
-          }
-
-          // 鸿蒙底层适配：dsh 服务启动引导（对应本仓库 scripts/dsh-web.sh）
-          Column({ space: 6 }) {
-            Text('dsh 服务启动（在鸿蒙终端执行）')
-              .fontSize(12)
-              .fontColor(Theme.COLOR_SUBTEXT)
-              .width('100%')
-            Text('sh ~/bin/dsh-web.sh\n# node=/data/service/hnp/node.org/node_v24.13.0/bin/node\n# patch=harmony.patch.yml · 端口 3080')
-              .fontSize(11)
-              .fontFamily(Theme.FONT_MONO)
-              .fontColor(Theme.COLOR_SUBTEXT)
-              .lineHeight(17)
-              .width('100%')
-              .padding(10)
-              .backgroundColor(Theme.COLOR_CODE_BG)
-              .borderRadius(8)
-          }
-          .width('100%')
-
-          Text('DeepSeek Harness 鸿蒙桌面客户端 v1.5.0')
-            .fontSize(12)
-            .fontColor(Theme.COLOR_SUBTEXT)
-            .width('100%')
-            .textAlign(TextAlign.Center)
-          Text('内置直连 · dsh 服务双模式（HTTP RPC + SSE）')
-            .fontSize(11)
-            .fontColor(Theme.COLOR_SUBTEXT)
-            .width('100%')
-            .textAlign(TextAlign.Center)
         }
-        .width('100%')
-        .padding(20)
+        .width(Theme.SETTINGS_NAV_WIDTH)
+        .height('100%')
+        .padding({ left: 12, right: 12, top: 22 })
         .alignItems(HorizontalAlign.Start)
+
+        // —— 右侧内容（头 54 + 选项区滚动）——
+        Column() {
+          Row() {
+            Text(this.section === SECTION_GENERAL ? '通用设置' : '模型与连接')
+              .fontSize(16)
+              .lineHeight(24)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+            Blank()
+            Row() {
+              IconCloseOutline({ size: 16, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+            }
+            .width(28)
+            .height(28)
+            .justifyContent(FlexAlign.Center)
+            .borderRadius(Theme.RADIUS_SM)
+            .onClick(() => {
+              this.onClose();
+            })
+          }
+          .width('100%')
+          .height(Theme.SETTINGS_HEADER_HEIGHT)
+          .padding({ left: 20, right: 14, top: 20, bottom: 8 })
+
+          Scroll() {
+            Column() {
+              if (this.section === SECTION_GENERAL) {
+                this.generalSection()
+              } else {
+                this.modelsSection()
+              }
+            }
+            .width('100%')
+            .padding({ left: 24, right: 24, bottom: 24 })
+            .alignItems(HorizontalAlign.Start)
+          }
+          .layoutWeight(1)
+          .scrollBar(BarState.Auto)
+          .align(Alignment.TopStart)
+        }
+        .layoutWeight(1)
+        .height('100%')
       }
-      .layoutWeight(1)
       .width('100%')
-      .scrollBar(BarState.Off)
+      .height('100%')
     }
     .width('100%')
+    .constraintSize({ maxWidth: Theme.SETTINGS_PANEL_SIZE })
     .height('100%')
-    .backgroundColor(Theme.GLASS_HEADER)
+    .constraintSize({ maxHeight: Theme.SETTINGS_PANEL_SIZE })
+    .borderRadius(Theme.RADIUS_PANEL)
+    .backgroundColor(Theme.palette(this.dark).dswAliasBgLayer2)
+    .shadow({ radius: 32, color: 'rgba(0, 0, 0, 0.08)', offsetY: 12 })
+    .clip(true)
+  }
+
+  /** 导航格（.navCell：40 高 / 圆角 12 / 内边距 9-16-9-12 / 图标 + 14-22 文本）。 */
+  @Builder
+  navCell(section: number, label: string, glyph: number) {
+    Row({ space: 8 }) {
+      if (glyph === 0) {
+        IconPersonalizationOutline({ size: 16, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+      } else {
+        IconApiOutline({ size: 16, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+      }
+      Text(label)
+        .fontSize(Theme.FONT_ROW)
+        .lineHeight(Theme.LINE_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .layoutWeight(1)
+    }
+    .width('100%')
+    .height(Theme.SETTINGS_NAV_CELL_HEIGHT)
+    .padding({ left: 12, right: 16, top: 9, bottom: 9 })
+    .borderRadius(Theme.RADIUS_MD)
+    .backgroundColor(this.section === section
+      ? Theme.palette(this.dark).dswSpecificSidebarNavItemActive
+      : Color.Transparent)
+    .onClick(() => {
+      this.section = section;
+    })
+  }
+
+  // —— 通用设置：外观立方 / 正文字号 / 当前版本 ——
+  @Builder
+  generalSection() {
+    Column({ space: 8 }) {
+      Text('外观')
+        .fontSize(Theme.FONT_ROW)
+        .lineHeight(Theme.LINE_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .width('100%')
+        .margin({ bottom: 0 })
+      Row({ space: 8 }) {
+        this.themeCube(Appearance.LIGHT, '浅色', 0)
+        this.themeCube(Appearance.DARK, '深色', 1)
+        this.themeCube(Appearance.SYSTEM, '跟随系统', 2)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+    }
+    .width('100%')
+    .padding({ top: 16, bottom: 16 })
+    .border({ width: { bottom: 0.5 }, color: Theme.palette(this.dark).dswAliasBorderL2 })
+
+    Row({ space: 8 }) {
+      Column({ space: 4 }) {
+        Text('正文字号')
+          .fontSize(Theme.FONT_ROW)
+          .lineHeight(Theme.LINE_ROW)
+          .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        Text('会话正文与输入稿的字号（12–17）')
+          .fontSize(Theme.FONT_SMALL)
+          .lineHeight(Theme.LINE_SECONDARY)
+          .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Row({ space: 8 }) {
+        Row({ space: 2 }) {
+          Text(this.contentFontSize.toString())
+            .fontSize(Theme.FONT_ROW)
+            .lineHeight(Theme.LINE_ROW)
+            .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+            .minFontSize(0)
+          Column({ space: 2 }) {
+            Row() {
+              IconChevronUpOutline({ size: 12, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+            }
+            .width(17)
+            .height(12)
+            .justifyContent(FlexAlign.Center)
+            .borderRadius(Theme.RADIUS_XS)
+            .onClick(() => {
+              if (this.contentFontSize < 17) {
+                this.onFontSizeChange(this.contentFontSize + 1);
+              }
+            })
+            Row() {
+              IconChevronDownOutline({ size: 12, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+            }
+            .width(17)
+            .height(12)
+            .justifyContent(FlexAlign.Center)
+            .borderRadius(Theme.RADIUS_XS)
+            .onClick(() => {
+              if (this.contentFontSize > 12) {
+                this.onFontSizeChange(this.contentFontSize - 1);
+              }
+            })
+          }
+        }
+        .width(72)
+        .height(36)
+        .justifyContent(FlexAlign.Center)
+        .borderRadius(Theme.RADIUS_MD)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgModulePlatform)
+
+        Text('px')
+          .fontSize(Theme.FONT_ROW)
+          .lineHeight(Theme.LINE_ROW)
+          .fontColor(Theme.palette(this.dark).dswAliasLabelSecondary)
+      }
+      .alignItems(VerticalAlign.Center)
+    }
+    .width('100%')
+    .padding({ top: 16, bottom: 16 })
+    .border({ width: { bottom: 0.5 }, color: Theme.palette(this.dark).dswAliasBorderL2 })
+
+    Row() {
+      Text('当前版本')
+        .fontSize(Theme.FONT_ROW)
+        .lineHeight(Theme.LINE_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .layoutWeight(1)
+      Text(this.appVersion.length > 0 ? this.appVersion : '—')
+        .fontSize(Theme.FONT_ROW)
+        .lineHeight(Theme.LINE_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+    }
+    .width('100%')
+    .padding({ top: 16, bottom: 16 })
+  }
+
+  /** 外观立方（AppearanceRow .themeCube：20/32 内边距、圆角 20、选中填充 module-platform）。 */
+  @Builder
+  themeCube(value: string, label: string, glyph: number) {
+    Column({ space: 4 }) {
+      if (glyph === 0) {
+        IconLightOutline({ size: 20, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+      } else if (glyph === 1) {
+        IconDarkOutline({ size: 20, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+      } else {
+        IconFollowsystemOutline({ size: 20, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+      }
+      Text(label)
+        .fontSize(Theme.FONT_ROW)
+        .lineHeight(Theme.LINE_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+    }
+    .layoutWeight(1)
+    .padding({ left: 32, right: 32, top: 20, bottom: 20 })
+    .borderRadius(Theme.RADIUS_XL)
+    .border({
+      width: 0.5,
+      color: this.appearance === value ? '#ADB2B8' : Theme.palette(this.dark).dswAliasBorderL4
+    })
+    .backgroundColor(this.appearance === value ? Theme.palette(this.dark).dswAliasBgModulePlatform : Color.Transparent)
+    .onClick(() => {
+      this.onAppearanceChange(value);
+    })
+  }
+
+  // —— 模型与连接 ——
+  @Builder
+  modelsSection() {
+    this.formRow('连接模式', '独立模式内置对话模式与提示、打开即用；dsh 服务模式对接本机或局域网实例')
+    Select([{ value: '独立模式（内置，开箱即用）' }, { value: 'dsh 服务模式' }])
+      .selected(this.modeIndex)
+      .value(this.mode === 'dsh' ? 'dsh 服务模式' : '独立模式（内置，开箱即用）')
+      .font({ size: Theme.FONT_ROW })
+      .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+      .selectedOptionFont({ size: Theme.FONT_ROW })
+      .optionFont({ size: Theme.FONT_ROW })
+      .width('100%')
+      .height(44)
+      .backgroundColor(Theme.palette(this.dark).dswAliasBgModulePlatform)
+      .borderRadius(Theme.RADIUS_MD)
+      .margin({ bottom: 16 })
+      .onSelect((index: number, value: string) => {
+        this.modeIndex = index;
+        this.onModeChange(index === 1 ? 'dsh' : 'direct');
+        if (index === 1) {
+          this.loadModelConfig();
+        }
+      })
+
+    if (this.mode === 'direct') {
+      this.formRow('独立模式', 'API Key 与接口地址仅存本机，不经过服务端；对话模式随包内置')
+      TextInput({ text: this.directBaseInput, placeholder: Constants.DIRECT_BASE_URL })
+        .height(44)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .placeholderColor(Theme.palette(this.dark).dswAliasLabelCaption)
+        .backgroundColor(Color.Transparent)
+        .borderRadius(Theme.RADIUS_LG)
+        .border({ width: 0.5, color: Theme.palette(this.dark).dswAliasBorderL4 })
+        .padding({ left: 14, right: 14 })
+        .margin({ bottom: 8 })
+        .onChange((value: string) => {
+          this.directBaseInput = value;
+        })
+      TextInput({ text: this.directKeyInput, placeholder: 'DeepSeek API Key' })
+        .type(InputType.Password)
+        .height(44)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .placeholderColor(Theme.palette(this.dark).dswAliasLabelCaption)
+        .backgroundColor(Color.Transparent)
+        .borderRadius(Theme.RADIUS_LG)
+        .border({ width: 0.5, color: Theme.palette(this.dark).dswAliasBorderL4 })
+        .padding({ left: 14, right: 14 })
+        .margin({ bottom: 8 })
+        .onChange((value: string) => {
+          this.directKeyInput = value;
+        })
+      Select(this.buildDirectModelOptions())
+        .selected(this.directModelIndex)
+        .value(this.directModel)
+        .font({ size: Theme.FONT_ROW })
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .selectedOptionFont({ size: Theme.FONT_ROW })
+        .optionFont({ size: Theme.FONT_ROW })
+        .width('100%')
+        .height(44)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgModulePlatform)
+        .borderRadius(Theme.RADIUS_MD)
+        .margin({ bottom: 8 })
+        .onSelect((index: number, value: string) => {
+          this.directModelIndex = index;
+        })
+      Button('保存独立模式配置')
+        .height(36)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimaryForeground)
+        .backgroundColor(Theme.palette(this.dark).dswAliasButtonPrimaryFill)
+        .borderRadius(Theme.RADIUS_MD)
+        .margin({ bottom: 16 })
+        .onClick(() => {
+          this.saveDirect();
+        })
+    } else {
+      this.formRow('dsh 服务地址', this.statusText)
+      TextInput({ text: this.urlInput, placeholder: 'http://127.0.0.1:3080' })
+        .height(44)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .placeholderColor(Theme.palette(this.dark).dswAliasLabelCaption)
+        .backgroundColor(Color.Transparent)
+        .borderRadius(Theme.RADIUS_LG)
+        .border({ width: 0.5, color: Theme.palette(this.dark).dswAliasBorderL4 })
+        .padding({ left: 14, right: 14 })
+        .margin({ bottom: 8 })
+        .onChange((value: string) => {
+          this.urlInput = value;
+        })
+      Button('保存并连接')
+        .height(36)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimaryForeground)
+        .backgroundColor(Theme.palette(this.dark).dswAliasButtonPrimaryFill)
+        .borderRadius(Theme.RADIUS_MD)
+        .margin({ bottom: 16 })
+        .onClick(() => {
+          this.onSave(this.urlInput.trim());
+        })
+
+      this.formRow('服务端模型', this.providerName.length > 0
+        ? (this.providerName + (this.providerActive ? '（已启用）' : '（未启用）'))
+        : '加载中…')
+      TextInput({ text: this.apiKeyInput, placeholder: this.apiKeySet ? 'API Key 已设置（输入可覆盖）' : 'API Key' })
+        .type(InputType.Password)
+        .height(44)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .placeholderColor(Theme.palette(this.dark).dswAliasLabelCaption)
+        .backgroundColor(Color.Transparent)
+        .borderRadius(Theme.RADIUS_LG)
+        .border({ width: 0.5, color: Theme.palette(this.dark).dswAliasBorderL4 })
+        .padding({ left: 14, right: 14 })
+        .margin({ bottom: 8 })
+        .onChange((value: string) => {
+          this.apiKeyInput = value;
+        })
+      Button('保存 API Key')
+        .height(36)
+        .fontSize(Theme.FONT_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimaryForeground)
+        .backgroundColor(Theme.palette(this.dark).dswAliasButtonPrimaryFill)
+        .borderRadius(Theme.RADIUS_MD)
+        .margin({ bottom: 8 })
+        .onClick(() => {
+          this.saveApiKey();
+        })
+      if (this.modelOptions.length > 0) {
+        Select(this.modelOptions)
+          .selected(this.modelIndex)
+          .value(this.currentModel.length > 0 ? this.currentModel : '选择模型')
+          .font({ size: Theme.FONT_ROW })
+          .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+          .selectedOptionFont({ size: Theme.FONT_ROW })
+          .optionFont({ size: Theme.FONT_ROW })
+          .width('100%')
+          .height(44)
+          .backgroundColor(Theme.palette(this.dark).dswAliasBgModulePlatform)
+          .borderRadius(Theme.RADIUS_MD)
+          .margin({ bottom: 8 })
+          .onSelect((index: number, value: string) => {
+            this.modelIndex = index;
+            this.saveModel();
+          })
+      }
+    }
+
+    this.formRow('默认对话模式', '鸿蒙 harmony-* 预设，切换后新建对话生效')
+    if (this.presetIds.length > 0) {
+      Select(this.presetOptions)
+        .selected(this.presetIndex)
+        .value(this.currentPreset.length > 0 ? this.currentPreset : '（使用部署默认）')
+        .font({ size: Theme.FONT_ROW })
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+        .selectedOptionFont({ size: Theme.FONT_ROW })
+        .optionFont({ size: Theme.FONT_ROW })
+        .width('100%')
+        .height(44)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgModulePlatform)
+        .borderRadius(Theme.RADIUS_MD)
+        .onSelect((index: number, value: string) => {
+          this.presetIndex = index;
+          if (index >= 0 && index < this.presetIds.length) {
+            this.onPresetSelect(this.presetIds[index]);
+          }
+        })
+    } else {
+      Text('（预设列表不可用）')
+        .fontSize(Theme.FONT_SMALL)
+        .lineHeight(Theme.LINE_SECONDARY)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+    }
+
+    if (this.modelStatus.length > 0) {
+      Text(this.modelStatus)
+        .fontSize(Theme.FONT_SMALL)
+        .lineHeight(Theme.LINE_SECONDARY)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+        .width('100%')
+        .margin({ top: 12 })
+    }
+  }
+
+  /** 行标题 + 说明（FontSizeRow：标题 14/22、说明 12/18 三级色）。 */
+  @Builder
+  formRow(title: string, desc: string) {
+    Column({ space: 4 }) {
+      Text(title)
+        .fontSize(Theme.FONT_ROW)
+        .lineHeight(Theme.LINE_ROW)
+        .fontColor(Theme.palette(this.dark).dswAliasLabelPrimary)
+      if (desc.length > 0) {
+        Text(desc)
+          .fontSize(Theme.FONT_SMALL)
+          .lineHeight(Theme.LINE_SECONDARY)
+          .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .margin({ top: 4, bottom: 8 })
   }
 }

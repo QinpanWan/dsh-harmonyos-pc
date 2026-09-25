@@ -3,22 +3,41 @@
  *
  * 职责：
  * - 加载/保存服务器地址（@ohos.data.preferences）
- * - 建立 dsh 连接（describe 探测 + events.mux SSE 流）
+ * - 建立 dsh 连接（cookie 登录 + `/api/remote.mux` WebSocket 事件流）
  * - 会话列表、历史加载、消息发送/停止、实时事件折叠（foldEvent）
  *
  * 参照华为开发者文档《声明式UI语法》：
  * @Entry 页面入口、@Component 自定义组件、@State 组件内状态、
  * $$ 双向绑定（bindSheet）、@Builder 复用 UI 片段。
  */
-import { Constants } from '../common/Constants';
-import { Theme } from '../common/Theme';
+import { Constants, PermissionRisk } from '../common/Constants';
+import { PresetCatalog, PresetInfo } from '../common/PresetCatalog';
+import { Appearance, KEY_CONTENT_FONT_SIZE, KEY_DARK_THEME, Theme } from '../common/Theme';
 import { DshApiClient, DeepSeekClient } from '../service/DshApiClient';
 import { ChatMessage, DshSession } from '../model/Types';
 import { Sidebar } from '../view/Sidebar';
 import { ChatView } from '../view/ChatView';
 import { SettingsPanel } from '../view/SettingsPanel';
+import { DesktopMenuBar, DesktopMenuDropdown, DESKTOP_MENUBAR_HEIGHT } from '../view/DesktopMenuBar';
+import {
+  DesktopAboutPanel, DesktopPermissionRiskPanel, DesktopQuitConfirmPanel, DesktopUpdatePanel,
+} from '../view/DesktopDialogs';
+import { DesktopShellContract, MenuSpec } from '../desktop/DesktopShellContract';
+import { DESKTOP_ZH, DesktopCopy, DesktopMessages } from '../desktop/DesktopCopy';
+import { DesktopPrefs, DesktopPrefKeys } from '../desktop/DesktopPrefs';
+import { DesktopUpdatePhase, DesktopUpdateService } from '../service/DesktopUpdateService';
+import { DesktopDirectoryPicker } from '../desktop/DesktopDirectoryPicker';
+import {
+  DESKTOP_CHROME_CHANGED, DESKTOP_CONFIG_CHANGED, DESKTOP_PAGE_READY, DESKTOP_QUIT_DECISION,
+  DESKTOP_QUIT_REQUEST,
+} from '../entryability/EntryAbility';
 import { preferences } from '@kit.ArkData';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
+import { common, ConfigurationConstant, Want } from '@kit.AbilityKit';
+import { bundleManager } from '@kit.AbilityKit';
+import { i18n } from '@kit.LocalizationKit';
+import { window } from '@kit.ArkUI';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 @Entry
 @Component
@@ -33,20 +52,87 @@ struct Index {
   @State streaming: boolean = false;
   @State showSettings: boolean = false;
   @State statusText: string = '未连接';
-  /** 部署可用的对话模式预设（鸿蒙 harmony-* 六套，来自 dsh-harmonyos 仓库） */
+  /** 部署可用的对话模式预设 id 与产品名（平行数组，来源见 loadPresets） */
   @State presetIds: string[] = [];
+  @State presetNames: string[] = [];
   @State currentPreset: string = '';
+  /** 随 HAP 分发内置的对话模式目录（rawfile/presets.json）：显示名 + 独立模式的系统提示 */
+  @State presets: PresetInfo[] = [];
+  /** 首页「工作区」选择器候选（会话 cwd 去重 + 手选目录；上游工作区菜单的鸿蒙等价物） */
+  @State workspaceOptions: string[] = [];
+  /** 首页「工作区权限」选择器：目录 + 当前会话的值（上游 conversation.input.permission 座位） */
+  @State permissionOptions: string[] = [];
+  @State currentPermission: string = '';
+  /** 权限风险确认弹层（上游 RiskConfirmation：完全权限 / Auto review 两档） */
+  @State permissionRiskVisible: boolean = false;
+  @State permissionRiskAck: boolean = false;
+  @State permissionRiskValue: string = '';
+  @State permissionRiskTitle: string = '';
+  @State permissionRiskBody: string = '';
+  @State permissionRiskConfirm: string = '';
+  /** 当前会话绑定的对话模式（首个回合后锁定，与上游「hero 上的 preset 座位」同语义） */
+  @State sessionPreset: string = '';
   /** 连接模式：'direct' 内置直连（打开即用）/ 'dsh' dsh 服务 */
   @State mode: string = 'direct';
   @State directApiKey: string = '';
   @State directModel: string = 'deepseek-v4-flash';
   @State directModels: string[] = Constants.DIRECT_MODELS;
+  /** 独立模式接口地址（默认官方 DeepSeek，可换任意 OpenAI 兼容端点） */
+  @State directBaseUrl: string = Constants.DIRECT_BASE_URL;
+  /** 模型胶囊：候选键（独立=模型 id / dsh=provider/model）与当前键 */
+  @State modelKeys: string[] = Constants.DIRECT_MODELS;
+  @State currentModelKey: string = 'deepseek-v4-flash';
+  /** dsh 服务端模型目录的默认项（`session/modelCatalog`.default） */
+  @State catalogDefaultModel: string = '';
+  /** 系统标题栏是否仍然可见（隐藏失败时页面不再自绘品牌标，避免同一枚 logo 出现两次） */
+  @State systemDecorVisible: boolean = false;
   private client: DshApiClient | null = null;
   private deepseek: DeepSeekClient = new DeepSeekClient();
+  /** 当前会话的事件流（切换会话/断开时取消订阅） */
+  private followStreamId: string = '';
+  /** 登录会话 cookie（`dsh-auth-*`，本机回环签发，落盘复用） */
+  private authCookie: string = '';
   private scroller: Scroller = new Scroller();
+  // —— 桌面壳层（菜单栏 / 关于 / 退出确认 / 更新检查 / 目录选择）——
+  @State shell: DesktopShellContract = new DesktopShellContract();
+  @State desktopCopy: DesktopMessages = DESKTOP_ZH;
+  @State openMenuId: string = '';
+  @State aboutVisible: boolean = false;
+  @State quitVisible: boolean = false;
+  @State updateVisible: boolean = false;
+  @State updatePhase: string = DesktopUpdatePhase.IDLE;
+  @State updateTitle: string = '';
+  @State updateMessage: string = '';
+  @State updateDetail: string = '';
+  @State showUpdateTechnical: boolean = false;
+  @State appVersion: string = '';
+  /** 窗口是否处于最大化/全屏（标题栏「最大化/还原」键据此换字形，也决定点击语义）。 */
+  @State windowMaximized: boolean = false;
+  @State workspaceDirectory: string = '';
+  /** 窗口宽度（用于上游 SIDEBAR_AUTO_COLLAPSE=1024 的自动收起判定） */
+  @State windowWidth: number = 1280;
+  /** 侧栏折叠手动覆盖：-1 自动 / 0 展开 / 1 收起 */
+  @State sidebarOverride: number = -1;
+  /** 外观偏好（system / light / dark，上游 ui-theme 的 ui-theme 设置命名空间） */
+  @State appearance: string = Appearance.SYSTEM;
+  /** 当前生效的深浅色（applyAppearance 写入并同步 AppStorage，供 build 建立依赖） */
+  @State dark: boolean = true;
+  /** 会话正文档位（12–17，默认 14） */
+  @State contentFontSize: number = 14;
+  /** 会话主列实际宽度（用于 --dsh-chat-content-width 求解） */
+  @State columnWidth: number = 1200;
+  private prefs: DesktopPrefs | null = null;
+  private updates: DesktopUpdateService | null = null;
+  /** 菜单标题的窗口坐标（用于下拉层定位，键 = 菜单 id） */
+  private menuAnchors: Map<string, number> = new Map();
+  private menuAnchorX: number = 8;
 
   aboutToAppear(): void {
+    // 内置对话模式目录（rawfile/presets.json）：独立模式的「环境」就在这里，
+    // 不依赖 dsh 服务在线；读不到时 PresetCatalog 会回落到裸 id 列表。
+    this.presets = PresetCatalog.load(this.getUIContext().getHostContext());
     this.loadSettings();
+    this.setupDesktopShell();
   }
 
   aboutToDisappear(): void {
@@ -54,6 +140,10 @@ struct Index {
       this.client.closeMux();
     }
     this.deepseek.stop();
+    const service: DesktopUpdateService | null = this.updates;
+    if (service !== null) {
+      service.dispose();
+    }
   }
 
   // —— 设置持久化 ——
@@ -76,10 +166,27 @@ struct Index {
       this.directApiKey = dk;
       const dm: string = store.getSync(Constants.KEY_DIRECT_MODEL, 'deepseek-v4-flash') as string;
       this.directModel = dm;
+      const base: string = store.getSync(Constants.KEY_DIRECT_BASE_URL, Constants.DIRECT_BASE_URL) as string;
+      this.directBaseUrl = base.length > 0 ? base : Constants.DIRECT_BASE_URL;
+      const ap: string = store.getSync(Constants.KEY_APPEARANCE, Appearance.SYSTEM) as string;
+      this.appearance = ap;
+      const fs: number = store.getSync(Constants.KEY_CONTENT_FONT_SIZE, 14) as number;
+      this.contentFontSize = fs;
+      const cookie: string = store.getSync(Constants.KEY_AUTH_COOKIE, '') as string;
+      this.authCookie = cookie;
     } catch (e) {
       this.serverUrl = Constants.DEFAULT_SERVER;
     }
+    this.deepseek.setEndpoint(this.directBaseUrl);
+    this.syncDirectModelKeys();
+    this.applyAppearance();
     this.applyMode();
+  }
+
+  /** 独立模式的模型胶囊：候选 = 内置模型表，当前 = 选中的那一个。 */
+  private syncDirectModelKeys(): void {
+    this.modelKeys = this.directModels.slice();
+    this.currentModelKey = this.directModel;
   }
 
   /** 按模式初始化：direct=内置直连（打开即用）；dsh=连接服务 */
@@ -89,11 +196,27 @@ struct Index {
     } else {
       this.deepseek.stop();
       this.connected = true;
-      this.statusText = '直连模式（内置，打开即用）';
+      this.statusText = '独立模式（内置，打开即用）';
       this.connecting = false;
+      this.syncDirectModelKeys();
     }
     // 预设列表始终可用：服务端拉不到（未连接）时用内置六套
     this.loadPresets();
+  }
+
+  /** 保存登录 cookie（30 天有效，重启后直接复用） */
+  private saveAuthCookie(cookie: string): void {
+    const host = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      return;
+    }
+    try {
+      const store = preferences.getPreferencesSync(host, { name: Constants.SETTINGS_STORE });
+      store.putSync(Constants.KEY_AUTH_COOKIE, cookie);
+      store.flush();
+    } catch (e) {
+      // 保存失败不阻塞（下次启动重新取一枚）
+    }
   }
 
   private saveServerUrl(): void {
@@ -139,6 +262,73 @@ struct Index {
     }
   }
 
+  /**
+   * 解析并应用外观：跟随系统时读 Configuration.colorMode，否则用显式偏好。
+   * 两处 AppStorage 写入即触发所有订阅组件重绘（令牌切换无逐层传参）。
+   */
+  private applyAppearance(): void {
+    let dark: boolean = true;
+    if (this.appearance === Appearance.LIGHT) {
+      dark = false;
+    } else if (this.appearance === Appearance.DARK) {
+      dark = true;
+    } else {
+      dark = this.systemDark();
+    }
+    // 页面自身走 @State（build 读到即重建）；子组件走 AppStorage（@StorageProp 订阅）。
+    this.dark = dark;
+    AppStorage.setOrCreate(KEY_DARK_THEME, dark);
+    AppStorage.setOrCreate(KEY_CONTENT_FONT_SIZE, this.contentFontSize);
+  }
+
+  /** 系统是否深色（Configuration.colorMode；读不到时沿用上一次）。 */
+  private systemDark(): boolean {
+    const host = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (host === undefined || host === null) {
+      return Theme.isDark();
+    }
+    const mode: ConfigurationConstant.ColorMode | undefined = host.config.colorMode;
+    if (mode === undefined) {
+      return Theme.isDark();
+    }
+    return mode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+  }
+
+  /** 保存外观偏好并立即生效（对应上游 ui-theme 的外观选择）。 */
+  private saveAppearance(appearance: string): void {
+    this.appearance = appearance;
+    this.applyAppearance();
+    const host = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      return;
+    }
+    try {
+      const store = preferences.getPreferencesSync(host, { name: Constants.SETTINGS_STORE });
+      store.putSync(Constants.KEY_APPEARANCE, appearance);
+      store.flush();
+    } catch (e) {
+      // 写失败不影响本次会话内的观感
+    }
+  }
+
+  /** 保存正文档位并立即生效（上游 12–17，默认 14）。 */
+  private saveContentFontSize(size: number): void {
+    const clamped: number = Math.min(17, Math.max(12, Math.round(size)));
+    this.contentFontSize = clamped;
+    this.applyAppearance();
+    const host = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      return;
+    }
+    try {
+      const store = preferences.getPreferencesSync(host, { name: Constants.SETTINGS_STORE });
+      store.putSync(Constants.KEY_CONTENT_FONT_SIZE, clamped);
+      store.flush();
+    } catch (e) {
+      // 同上
+    }
+  }
+
   /** 保存直连模式配置（API Key + 模型，存应用本地，不经过服务端） */
   private saveDirectConfig(): void {
     const host = this.getUIContext().getHostContext();
@@ -149,47 +339,87 @@ struct Index {
       const store = preferences.getPreferencesSync(host, { name: Constants.SETTINGS_STORE });
       store.putSync(Constants.KEY_DIRECT_API_KEY, this.directApiKey);
       store.putSync(Constants.KEY_DIRECT_MODEL, this.directModel);
+      store.putSync(Constants.KEY_DIRECT_BASE_URL, this.directBaseUrl);
       store.flush();
     } catch (e) {
       // 保存失败不阻塞
     }
   }
 
-  /** 加载对话模式预设：优先 dsh 服务端列表（agentPreset.list），失败/未连接时用内置六套 */
+  /**
+   * 加载对话模式：**先内置、后服务**。
+   * 内置目录（rawfile/presets.json）永远可用 → 独立模式开箱即用；dsh 服务在线时再用
+   * `agentPresets/list` 覆盖（服务端那份是部署真值，可能多出本仓库没有的预设）。
+   * 服务端只给 id/name/description，产品名与系统提示仍以内置目录为准（提示是客户端要用的）。
+   */
   private loadPresets(): void {
+    this.applyBundledPresets();
     const client = this.client;
     if (client === null) {
-      this.applyBuiltinPresets();
       return;
     }
     client.agentPresetList().then((items: Array<Record<string, Object>>) => {
       const ids: string[] = [];
+      const names: string[] = [];
       for (let i = 0; i < items.length; i++) {
-        const broken = items[i]['broken'];
-        if (broken !== undefined && broken !== null) {
+        if (items[i]['broken'] !== undefined && items[i]['broken'] !== null) {
           continue; // broken 预设不可选
         }
-        ids.push(String(items[i]['id']));
+        const id: string = String(items[i]['id']);
+        ids.push(id);
+        const served: string = items[i]['name'] === undefined || items[i]['name'] === null
+          ? '' : String(items[i]['name']);
+        // 内置目录有中文产品名（且与仓库同源）时优先它，服务端只补它没有的
+        const bundled: string = PresetCatalog.displayName(this.presets, id);
+        names.push(bundled !== id ? bundled : (served.length > 0 ? served : id));
       }
       if (ids.length === 0) {
-        this.applyBuiltinPresets();
         return;
       }
       this.presetIds = ids;
+      this.presetNames = names;
       if (this.currentPreset.length > 0 && ids.indexOf(this.currentPreset) === -1) {
         this.currentPreset = '';
       }
     }).catch((e: BusinessError) => {
-      this.applyBuiltinPresets();
+      // 服务端不可用：内置目录已在上面生效，什么都不用做
     });
   }
 
-  /** 使用内置六套鸿蒙预设（不依赖 dsh 服务）；默认对话模式设为 promax */
-  private applyBuiltinPresets(): void {
-    this.presetIds = Constants.BUILTIN_PRESETS.slice();
+  /** 内置目录 → 胶囊列表；默认对话模式设为 ProMax（与仓库 presets 的 order 一致）。 */
+  private applyBundledPresets(): void {
+    const list: PresetInfo[] = this.presets.length > 0 ? this.presets : PresetCatalog.fallback();
+    const ids: string[] = [];
+    const names: string[] = [];
+    for (let i = 0; i < list.length; i++) {
+      ids.push(list[i].id);
+      names.push(list[i].name.length > 0 ? list[i].name : list[i].id);
+    }
+    this.presetIds = ids;
+    this.presetNames = names;
     if (this.currentPreset.length === 0) {
       this.currentPreset = 'harmony-chat-promax';
     }
+  }
+
+  /** 对话模式胶囊文案：会话绑定的优先，其次暂存值 → 产品名。 */
+  private presetLabel(): string {
+    const id: string = this.sessionPreset.length > 0 ? this.sessionPreset : this.currentPreset;
+    if (id.length === 0) {
+      return '';
+    }
+    return PresetCatalog.displayName(this.presets, id);
+  }
+
+  /** 当前模式的说明（菜单首行）。 */
+  private presetDescription(): string {
+    const id: string = this.sessionPreset.length > 0 ? this.sessionPreset : this.currentPreset;
+    return PresetCatalog.describe(this.presets, id);
+  }
+
+  /** 模式是否锁定：已经开聊（两侧同语义，上游「首个回合后锁定」）。 */
+  private presetLocked(): boolean {
+    return this.messages.length > 0;
   }
 
   // —— 连接 ——
@@ -202,28 +432,97 @@ struct Index {
     this.statusText = '连接中…';
     const client: DshApiClient = new DshApiClient(this.serverUrl);
     this.client = client;
-    client.openMux(
-      (frame: Record<string, Object>) => { this.onMuxFrame(frame); },
-      () => {
-        // 事件流建立（含断线自动重连成功）：恢复连接态并刷新会话列表
-        this.connected = true;
-        this.statusText = '已连接';
-        this.refreshSessions();
-      },
-      (msg: string) => {
-        this.connected = false;
-        this.statusText = msg;
+    // 0.1.6 起 /api/* 与事件流都要求会话 cookie：本机回环由 Host 直接签发（30 天），
+    // 先复用落盘的那枚；过期/缺失时 DshApiClient 内部还会在 401 后再取一次。
+    client.setCookie(this.authCookie);
+    client.login().then((cookie: string) => {
+      if (cookie.length > 0 && cookie !== this.authCookie) {
+        this.authCookie = cookie;
+        this.saveAuthCookie(cookie);
       }
-    );
-    client.describe().then(() => {
+      client.openMux(
+        () => {
+          // 事件流建立（含断线自动重连成功）：恢复连接态、刷新会话列表并重订当前会话
+          this.connected = true;
+          this.statusText = '已连接';
+          this.refreshSessions();
+          this.refollowSession();
+        },
+        (msg: string) => {
+          this.connected = false;
+          this.statusText = msg;
+        }
+      );
+      return client.describe();
+    }).then(() => {
       this.connected = true;
       this.statusText = '已连接';
       this.connecting = false;
       this.refreshSessions();
+      this.loadPermissionCatalog();
+      this.loadModelCatalog();
     }).catch((e: BusinessError) => {
       this.connecting = false;
       this.connected = false;
       this.statusText = '未连接：服务未启动？先在鸿蒙终端运行 sh ~/bin/dsh-web.sh（自动探测中…）';
+    });
+  }
+
+  /** 读取工作区权限目录（沙箱模式 + 审批策略；`permissionPresets/catalog`） */
+  private loadPermissionCatalog(): void {
+    const client = this.client;
+    if (client === null) {
+      return;
+    }
+    client.permissionCatalog().then((options: Array<Record<string, Object>>) => {
+      const names: string[] = [];
+      for (let i = 0; i < options.length; i++) {
+        const value = options[i]['value'];
+        if (value !== undefined && value !== null) {
+          names.push(String(value));
+        }
+      }
+      this.permissionOptions = names;
+    }).catch((e: BusinessError) => {
+      // 目录拉不到就退回内置三档（与部署默认表一致）
+      this.permissionOptions = ['read-only', 'workspace-write', 'danger-full-access'];
+    });
+  }
+
+  /**
+   * 读取 dsh 服务端模型目录（`session/modelCatalog`）：groups[].models[] 摊平成
+   * `provider/model` 键进模型胶囊，default 作为当前值兜底（会话投影优先）。
+   */
+  private loadModelCatalog(): void {
+    const client = this.client;
+    if (client === null) {
+      return;
+    }
+    client.modelCatalog().then((value: Record<string, Object>) => {
+      const keys: string[] = [];
+      const groups: Array<Record<string, Object>> = value['groups'] as Array<Record<string, Object>>;
+      if (groups !== undefined && groups !== null) {
+        for (let i = 0; i < groups.length; i++) {
+          const provider: string = String(groups[i]['id']);
+          const models: Array<Record<string, Object>> = groups[i]['models'] as Array<Record<string, Object>>;
+          if (models === undefined || models === null) {
+            continue;
+          }
+          for (let j = 0; j < models.length; j++) {
+            keys.push(provider + '/' + String(models[j]['id']));
+          }
+        }
+      }
+      const fallback: Record<string, Object> = value['default'] as Record<string, Object>;
+      let defaultKey: string = '';
+      if (fallback !== undefined && fallback !== null && fallback['provider'] !== undefined) {
+        defaultKey = String(fallback['provider']) + '/' + String(fallback['model']);
+      }
+      this.modelKeys = keys;
+      this.catalogDefaultModel = defaultKey;
+      this.syncCurrentSessionState();
+    }).catch((e: BusinessError) => {
+      // 目录拉不到就空着：菜单会提示「目录未就绪」，不影响发消息
     });
   }
 
@@ -240,6 +539,10 @@ struct Index {
         session.updatedAt = Number(raw['updatedAt']);
         session.running = raw['running'] === true;
         session.blank = raw['blank'] === true;
+        const cwd = raw['cwd'];
+        if (cwd !== undefined && cwd !== null) {
+          session.cwd = String(cwd);
+        }
         const proj: Record<string, Object> = raw['projections'] as Record<string, Object>;
         if (proj !== undefined && proj !== null) {
           const values: Record<string, Object> = proj['values'] as Record<string, Object>;
@@ -247,6 +550,26 @@ struct Index {
             const title = values['title'];
             if (title !== undefined && title !== null) {
               session.title = String(title);
+            }
+            const permission: Record<string, Object> = values['permissions'] as Record<string, Object>;
+            if (permission !== undefined && permission !== null && permission['currentValue'] !== undefined) {
+              session.permission = String(permission['currentValue']);
+            }
+            const preset = values['agentPreset'];
+            if (preset !== undefined && preset !== null) {
+              session.agentPreset = String(preset);
+            }
+            // modelSelection 投影：lastUsed（已经用过的）/ next（下一次将用的）
+            const selection: Record<string, Object> = values['modelSelection'] as Record<string, Object>;
+            if (selection !== undefined && selection !== null) {
+              let used: Record<string, Object> = selection['lastUsed'] as Record<string, Object>;
+              if (used === undefined || used === null) {
+                used = selection['next'] as Record<string, Object>;
+              }
+              if (used !== undefined && used !== null && used['model'] !== undefined) {
+                session.model = String(used['model']);
+                session.modelProvider = used['provider'] === undefined ? '' : String(used['provider']);
+              }
             }
           }
         }
@@ -266,6 +589,8 @@ struct Index {
         }
       }
       this.sessions = list;
+      this.syncWorkspaceOptions(list);
+      this.syncCurrentSessionState();
       // 自动选中第一个非空会话
       if (this.currentSessionId.length === 0 && list.length > 0) {
         for (let i = 0; i < list.length; i++) {
@@ -279,6 +604,327 @@ struct Index {
     }).catch((e: BusinessError) => {
       this.statusText = String(e);
     });
+  }
+
+  // —— 首页选择器（工作区 / 工作区权限 / 对话模式） ——
+
+  /** 工作区候选：会话 cwd 去重（保序）+ 手选目录 + 当前会话工作区 */
+  private syncWorkspaceOptions(list: DshSession[]): void {
+    const options: string[] = [];
+    const push = (value: string): void => {
+      if (value.length === 0) {
+        return;
+      }
+      for (let i = 0; i < options.length; i++) {
+        if (options[i] === value) {
+          return;
+        }
+      }
+      options.push(value);
+    };
+    push(this.workspaceDirectory);
+    for (let i = 0; i < list.length; i++) {
+      push(list[i].cwd);
+    }
+    this.workspaceOptions = options;
+  }
+
+  /** 当前会话的三个选择器取值（标题 / 工作区权限 / 对话模式） */
+  private syncCurrentSessionState(): void {
+    for (let i = 0; i < this.sessions.length; i++) {
+      const session: DshSession = this.sessions[i];
+      if (session.sessionId !== this.currentSessionId) {
+        continue;
+      }
+      this.currentPermission = session.permission;
+      this.sessionPreset = session.agentPreset;
+      if (session.model.length > 0 && session.modelProvider.length > 0) {
+        this.currentModelKey = session.modelProvider + '/' + session.model;
+      } else if (this.catalogDefaultModel.length > 0) {
+        this.currentModelKey = this.catalogDefaultModel;
+      }
+      return;
+    }
+  }
+
+  /** 当前选中会话（没有则 null）。 */
+  private currentSession(): DshSession | null {
+    for (let i = 0; i < this.sessions.length; i++) {
+      if (this.sessions[i].sessionId === this.currentSessionId) {
+        return this.sessions[i];
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 订阅当前会话的事件流（历史快照 + 实时事件 + 实时增量）。
+   * 与上游一致：切会话先取消上一条订阅，再按新会话重开。
+   */
+  private followCurrentSession(): void {
+    const client = this.client;
+    if (client === null || this.currentSessionId.length === 0) {
+      return;
+    }
+    if (this.followStreamId.length > 0) {
+      client.closeStream(this.followStreamId);
+      this.followStreamId = '';
+    }
+    this.followStreamId = client.followSession(this.currentSessionId, {
+      onFrame: (value: Record<string, Object>) => { this.onFollowValue(value); },
+      onEnd: (reason: string) => {
+        if (reason.length > 0) {
+          this.statusText = reason;
+        }
+      }
+    });
+  }
+
+  /** 连接（含重连）后重订当前会话 */
+  private refollowSession(): void {
+    if (this.mode !== 'dsh' || this.currentSessionId.length === 0) {
+      return;
+    }
+    this.followCurrentSession();
+  }
+
+  /** 事件流下行帧：snapshot（历史+投影）/ event（durable）/ assistant-stream（实时增量） */
+  private onFollowValue(value: Record<string, Object>): void {
+    const kind: string = String(value['type']);
+    if (kind === 'snapshot') {
+      this.applySnapshot(value);
+      return;
+    }
+    if (kind === 'event') {
+      const ev: Record<string, Object> = value['event'] as Record<string, Object>;
+      if (ev === undefined || ev === null) {
+        return;
+      }
+      this.applyLiveEvent(ev);
+      return;
+    }
+    if (kind === 'assistant-stream') {
+      const frame: Record<string, Object> = value['frame'] as Record<string, Object>;
+      if (frame === undefined || frame === null) {
+        return;
+      }
+      this.applyAssistantFrame(frame);
+    }
+  }
+
+  /** 历史快照：折叠 records 建消息列，并从投影基线刷新权限/模式 */
+  private applySnapshot(value: Record<string, Object>): void {
+    const projections: Record<string, Object> = value['projections'] as Record<string, Object>;
+    if (projections !== undefined && projections !== null) {
+      const values: Record<string, Object> = projections['values'] as Record<string, Object>;
+      if (values !== undefined && values !== null) {
+        const title = values['title'];
+        if (title !== undefined && title !== null && String(title).length > 0) {
+          this.currentTitle = String(title);
+          this.updateSessionTitleLocal(this.currentSessionId, String(title));
+        }
+        const permission: Record<string, Object> = values['permissions'] as Record<string, Object>;
+        if (permission !== undefined && permission !== null && permission['currentValue'] !== undefined) {
+          this.currentPermission = String(permission['currentValue']);
+        }
+      }
+    }
+    const records: Array<Record<string, Object>> = value['records'] as Array<Record<string, Object>>;
+    const list: ChatMessage[] = [];
+    let current: ChatMessage | null = null;
+    if (records !== undefined && records !== null) {
+      for (let i = 0; i < records.length; i++) {
+        const entry: Record<string, Object> = records[i];
+        const ev: Record<string, Object> = entry['event'] as Record<string, Object>;
+        if (ev === undefined || ev === null) {
+          continue;
+        }
+        current = this.foldEvent(ev, list, current);
+      }
+    }
+    this.messages = list;
+    this.streaming = false;
+    if (this.currentTitle.length === 0) {
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].role === 'user' && list[i].text.length > 0) {
+          const t: string = list[i].text.length > Constants.TITLE_MAX_CHARS ?
+            list[i].text.slice(0, Constants.TITLE_MAX_CHARS) : list[i].text;
+          this.currentTitle = t;
+          this.updateSessionTitleLocal(this.currentSessionId, t);
+          break;
+        }
+      }
+    }
+    this.scrollToBottom();
+  }
+
+  /** 一条 durable 事件（当前会话折叠进消息列，别的会话只更新运行态） */
+  private applyLiveEvent(ev: Record<string, Object>): void {
+    const list: ChatMessage[] = this.messages.slice();
+    let current: ChatMessage | null = null;
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === 'assistant' && list[i].status === 'streaming') {
+        current = list[i];
+        break;
+      }
+    }
+    this.foldEvent(ev, list, current);
+    this.messages = list;
+    const type: string = String(ev['type']);
+    if (type === 'turn/end' || type === 'session/title') {
+      this.refreshSessions();
+    }
+    this.scrollToBottom();
+  }
+
+  /** 实时增量帧（assistant-stream）：文本/思考逐字追加 */
+  private applyAssistantFrame(frame: Record<string, Object>): void {
+    const kind: string = String(frame['type']);
+    if (kind === 'start') {
+      this.streaming = true;
+      return;
+    }
+    if (kind === 'end') {
+      this.streaming = false;
+      return;
+    }
+    if (kind !== 'chunk') {
+      return;
+    }
+    const chunk: Record<string, Object> = frame['chunk'] as Record<string, Object>;
+    if (chunk === undefined || chunk === null) {
+      return;
+    }
+    const chunkType: string = String(chunk['type']);
+    if (chunkType !== 'text-delta' && chunkType !== 'reasoning-delta') {
+      return;
+    }
+    const list: ChatMessage[] = this.messages.slice();
+    let current: ChatMessage | null = null;
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === 'assistant' && list[i].status === 'streaming') {
+        current = list[i];
+        break;
+      }
+    }
+    if (current === null) {
+      current = new ChatMessage('stream-' + Date.now().toString(36), 'assistant', Date.now());
+      current.status = 'streaming';
+      list.push(current);
+    }
+    const text: string = chunk['text'] === undefined ? '' : String(chunk['text']);
+    if (chunkType === 'text-delta') {
+      current.text += text;
+    } else {
+      current.reasoning += text;
+    }
+    this.messages = list;
+    this.scrollToBottom();
+  }
+
+  /** 工作区胶囊：选中一个工作区（用于之后新建的会话） */
+  private pickWorkspace(path: string): void {
+    this.workspaceDirectory = path;
+    const prefs: DesktopPrefs | null = this.prefs;
+    if (prefs !== null) {
+      prefs.putString(DesktopPrefKeys.WORKSPACE_DIRECTORY, path);
+    }
+    const options: string[] = this.workspaceOptions.slice();
+    let found: boolean = false;
+    for (let i = 0; i < options.length; i++) {
+      if (options[i] === path) {
+        found = true;
+        break;
+      }
+    }
+    if (!found && path.length > 0) {
+      options.unshift(path);
+      this.workspaceOptions = options;
+    }
+    this.toast('工作区已设为：' + path);
+  }
+
+  /**
+   * 工作区权限胶囊：走 `/permission <preset>` 命令（与网页端同一写入路径）。
+   * 完全权限 / Auto review 两档先过风险确认（上游 RiskConfirmation），其余直接生效。
+   */
+  private pickPermission(preset: string): void {
+    const client = this.client;
+    if (client === null || this.currentSessionId.length === 0) {
+      this.toast('请先连接 dsh 服务并选择会话');
+      return;
+    }
+    if (Constants.permissionNeedsRisk(preset)) {
+      const risk: PermissionRisk = Constants.permissionRisk(preset);
+      this.permissionRiskValue = preset;
+      this.permissionRiskTitle = risk.title;
+      this.permissionRiskBody = risk.description;
+      this.permissionRiskConfirm = risk.confirmLabel;
+      this.permissionRiskAck = false;
+      this.permissionRiskVisible = true;
+      return;
+    }
+    this.commitPermission(preset);
+  }
+
+  /** 提交一次权限切换（风险档位由确认弹层调用） */
+  private commitPermission(preset: string): void {
+    const client = this.client;
+    if (client === null) {
+      return;
+    }
+    this.currentPermission = preset;
+    client.executeCommand(this.currentSessionId, '/permission ' + preset).then(() => {
+      this.toast('工作区权限已设为：' + Constants.permissionLabel(preset));
+    }).catch((e: BusinessError) => {
+      this.currentPermission = '';
+      this.toast('切换失败：' + String(e));
+      this.syncCurrentSessionState();
+    });
+  }
+
+  /** 权限胶囊是否可点：dsh 服务 + 已连接 + 当前会话存在（上游无会话则不渲染该座位） */
+  private permissionEnabled(): boolean {
+    return this.mode !== 'direct' && this.connected && this.currentSessionId.length > 0;
+  }
+
+  /** 权限胶囊不可用时的原因文案 */
+  private permissionReason(): string {
+    if (this.mode === 'direct') {
+      return '独立模式没有 dsh 工作区权限（这里是内置直连，不经过 dsh 沙箱）';
+    }
+    if (!this.connected) {
+      return '未连接 dsh 服务：先在设置里确认服务地址';
+    }
+    return '还没有会话：发一条消息就会建会话，之后可切换工作区权限';
+  }
+
+  /** 从胶囊菜单一键切到 dsh 服务模式（独立模式下工作区/权限都属于 dsh 服务） */
+  private switchToDshMode(): void {
+    if (this.mode === 'dsh') {
+      return;
+    }
+    this.mode = 'dsh';
+    this.saveMode('dsh');
+    this.deepseek.stop();
+    this.messages = [];
+    this.currentTitle = '';
+    this.applyMode();
+    this.toast('已切换到 dsh 服务模式');
+  }
+
+  /**
+   * 对话模式胶囊：独立模式下它就是「系统提示」（立即生效，下一轮开始生效）；
+   * dsh 服务模式下是新建会话的 agentPreset。已有对话内容的会话不可更换（与上游一致）。
+   */
+  private pickPreset(preset: string): void {
+    if (this.messages.length > 0) {
+      this.toast('当前会话已开始，对话模式不可更改；新建会话后生效');
+      return;
+    }
+    this.currentPreset = preset;
+    this.saveAgentPreset(preset);
+    this.toast('对话模式已设为：' + PresetCatalog.displayName(this.presets, preset));
   }
 
   // —— 会话 ——
@@ -296,7 +942,7 @@ struct Index {
     if (client === null) {
       return;
     }
-    client.createSession('', this.currentPreset).then((sessionId: string) => {
+    client.createSession(this.workspaceDirectory, this.currentPreset).then((sessionId: string) => {
       const session: DshSession = new DshSession(sessionId);
       const list: DshSession[] = [];
       list.push(session);
@@ -331,37 +977,17 @@ struct Index {
     }
     this.messages = [];
     this.streaming = false;
-    client.history(sessionId, Constants.HISTORY_MAX_MESSAGES).then((value: Record<string, Object>) => {
-      const events: Array<Record<string, Object>> = value['events'] as Array<Record<string, Object>>;
-      if (events === undefined || events === null) {
-        return;
+    this.currentPermission = '';
+    this.sessionPreset = '';
+    for (let i = 0; i < this.sessions.length; i++) {
+      if (this.sessions[i].sessionId === sessionId) {
+        this.currentPermission = this.sessions[i].permission;
+        this.sessionPreset = this.sessions[i].agentPreset;
+        break;
       }
-      const list: ChatMessage[] = [];
-      let current: ChatMessage | null = null;
-      for (let i = 0; i < events.length; i++) {
-        const entry: Record<string, Object> = events[i];
-        const ev: Record<string, Object> = entry['event'] as Record<string, Object>;
-        if (ev === undefined || ev === null) {
-          continue;
-        }
-        current = this.foldEvent(ev, list, current);
-      }
-      this.messages = list;
-      if (this.currentTitle.length === 0) {
-        for (let i = 0; i < list.length; i++) {
-          if (list[i].role === 'user' && list[i].text.length > 0) {
-            const t: string = list[i].text.length > Constants.TITLE_MAX_CHARS ?
-              list[i].text.slice(0, Constants.TITLE_MAX_CHARS) : list[i].text;
-            this.currentTitle = t;
-            this.updateSessionTitleLocal(sessionId, t);
-            break;
-          }
-        }
-      }
-      this.scrollToBottom();
-    }).catch((e: BusinessError) => {
-      this.statusText = String(e);
-    });
+    }
+    // 历史与实时事件同源：一条 session/follow 流既给快照也给增量（上游同一套语义）
+    this.followCurrentSession();
   }
 
   private updateSessionTitleLocal(sessionId: string, title: string): void {
@@ -388,7 +1014,7 @@ struct Index {
     if (this.directApiKey.length === 0) {
       // 未配置 Key：Toast 提示并直接打开设置
       try {
-        this.getUIContext().getPromptAction().showToast({ message: '请先在「设置」→「直连配置」填写 API Key' });
+        this.getUIContext().getPromptAction().showToast({ message: '请先在「设置」→「模型与连接」填写 API Key' });
       } catch (e) {
       }
       this.showSettings = true;
@@ -417,6 +1043,13 @@ struct Index {
     this.messages = list2;
     this.streaming = true;
     this.scrollToBottom();
+    // 独立模式的「对话模式」= 该预设的 persona 系统提示（rawfile/presets.json），
+    // {{model}} / {{cwd}} 就地替换成本机值；没选模式/提示缺失时退化为无 system 提示。
+    const modeId: string = this.currentPreset.length > 0 ? this.currentPreset : 'harmony-chat';
+    const systemPrompt: string = PresetCatalog.systemPrompt(
+      this.presets, modeId, this.directModel,
+      this.workspaceDirectory.length > 0 ? this.workspaceDirectory : '');
+    this.deepseek.setEndpoint(this.directBaseUrl);
     this.deepseek.chat(this.directApiKey, this.directModel, history,
       (delta: string) => {
         const msgs: ChatMessage[] = this.messages.slice();
@@ -457,17 +1090,17 @@ struct Index {
         this.messages = msgs;
         this.streaming = false;
         this.statusText = err;
-      });
+      },
+      systemPrompt);
   }
 
-  /** dsh 服务模式：走 dsh 的 session.prompt + SSE 事件流 */
+  /** dsh 服务模式：走 dsh 的 session/prompt + `/api/remote.mux` WebSocket 事件流 */
   private sendDsh(text: string): void {
-    const sessionId: string = this.currentSessionId;
     const client = this.client;
-    if (client === null || sessionId.length === 0) {
+    if (client === null) {
       return;
     }
-    // 乐观插入用户消息
+    // 乐观插入用户消息（持久事件回放时会就地接管这条回显，见 foldEvent 的 user/message）
     const userMsg: ChatMessage = new ChatMessage('local-' + Date.now().toString(), 'user', Date.now());
     userMsg.text = text;
     userMsg.status = 'done';
@@ -476,17 +1109,46 @@ struct Index {
     this.messages = list;
     this.streaming = true;
     this.scrollToBottom();
+    if (this.currentSessionId.length === 0) {
+      // 首页直接开聊（上游同样按需建会话）：先建会话（带工作区 + 对话模式）再发这条
+      client.createSession(this.workspaceDirectory, this.currentPreset).then((sessionId: string) => {
+        const session: DshSession = new DshSession(sessionId);
+        session.cwd = this.workspaceDirectory;
+        session.agentPreset = this.currentPreset;
+        const created: DshSession[] = [session];
+        for (let i = 0; i < this.sessions.length; i++) {
+          created.push(this.sessions[i]);
+        }
+        this.sessions = created;
+        this.currentSessionId = sessionId;
+        this.sessionPreset = this.currentPreset;
+        this.followCurrentSession();
+        return client.prompt(sessionId, text);
+      }).then(() => {
+        this.afterPrompt(text);
+      }).catch((e: BusinessError) => {
+        this.streaming = false;
+        this.statusText = String(e);
+      });
+      return;
+    }
+    const sessionId: string = this.currentSessionId;
     client.prompt(sessionId, text).then(() => {
-      if (this.currentTitle.length === 0) {
-        const t: string = text.length > Constants.TITLE_MAX_CHARS ?
-          text.slice(0, Constants.TITLE_MAX_CHARS) : text;
-        this.currentTitle = t;
-        this.updateSessionTitleLocal(sessionId, t);
-      }
+      this.afterPrompt(text);
     }).catch((e: BusinessError) => {
       this.streaming = false;
       this.statusText = String(e);
     });
+  }
+
+  /** 发送成功后的本地标题兜底（服务端 session/title 事件到达前先给个名字） */
+  private afterPrompt(text: string): void {
+    if (this.currentTitle.length === 0 || this.currentTitle === '新会话') {
+      const t: string = text.length > Constants.TITLE_MAX_CHARS ?
+        text.slice(0, Constants.TITLE_MAX_CHARS) : text;
+      this.currentTitle = t;
+      this.updateSessionTitleLocal(this.currentSessionId, t);
+    }
   }
 
   private stopGeneration(): void {
@@ -514,61 +1176,6 @@ struct Index {
     });
   }
 
-  // —— SSE 帧处理 ——
-
-  private onMuxFrame(frame: Record<string, Object>): void {
-    if (frame === undefined || frame === null) {
-      return;
-    }
-    const payload: Record<string, Object> = frame['payload'] as Record<string, Object>;
-    if (payload === undefined || payload === null) {
-      return;
-    }
-    const frameType: string = String(payload['type']);
-    if (frameType === 'session/event') {
-      const sessionId: string = String(payload['sessionId']);
-      const ev: Record<string, Object> = payload['event'] as Record<string, Object>;
-      if (ev === undefined || ev === null) {
-        return;
-      }
-      if (sessionId !== this.currentSessionId) {
-        this.updateSessionRunning(sessionId, ev);
-        return;
-      }
-      const list: ChatMessage[] = this.messages.slice();
-      let current: ChatMessage | null = null;
-      for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i].role === 'assistant' && list[i].status === 'streaming') {
-          current = list[i];
-          break;
-        }
-      }
-      this.foldEvent(ev, list, current);
-      this.messages = list;
-      this.scrollToBottom();
-    } else if (frameType === 'stream/error') {
-      const err: Record<string, Object> = payload['error'] as Record<string, Object>;
-      let msg: string = '流错误';
-      if (err !== undefined && err !== null) {
-        msg = '流错误：' + String(err['message']);
-      }
-      this.statusText = msg;
-    }
-  }
-
-  private updateSessionRunning(sessionId: string, ev: Record<string, Object>): void {
-    const type: string = String(ev['type']);
-    const isRunning: boolean = type === 'turn/start';
-    const list: DshSession[] = this.sessions.slice();
-    for (let i = 0; i < list.length; i++) {
-      if (list[i].sessionId === sessionId) {
-        list[i].running = isRunning;
-        break;
-      }
-    }
-    this.sessions = list;
-  }
-
   // —— 事件折叠：SessionEvent -> ChatMessage 列表 ——
 
   private foldEvent(ev: Record<string, Object>,
@@ -582,8 +1189,20 @@ struct Index {
     }
     if (type === 'user/message') {
       const content: Array<Record<string, Object>> = data['content'] as Array<Record<string, Object>>;
+      const text: string = this.blocksToText(content);
+      // 本地乐观回显（id 前缀 local-）与刚到的持久事件是同一条消息：就地接管，不再追加一条
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].role !== 'user') {
+          continue;
+        }
+        if (list[i].id.indexOf('local-') === 0 && list[i].text === text) {
+          list[i].id = String(data['id']);
+          return current;
+        }
+        break;
+      }
       const msg: ChatMessage = new ChatMessage(String(data['id']), 'user', time);
-      msg.text = this.blocksToText(content);
+      msg.text = text;
       msg.status = 'done';
       list.push(msg);
       return current;
@@ -696,96 +1315,845 @@ struct Index {
     }, 50);
   }
 
+  // —— 桌面壳层 ——
+
+  /** 载入壳契约、语言、设备偏好与更新调度（与上游壳启动时的职责一致）。 */
+  private setupDesktopShell(): void {
+    const host = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      return;
+    }
+    this.shell = DesktopShellContract.load(host.resourceManager);
+    this.desktopCopy = DesktopCopy.forLanguage(i18n.System.getSystemLanguage());
+    this.prefs = new DesktopPrefs(host);
+    this.workspaceDirectory = this.prefs.getString(DesktopPrefKeys.WORKSPACE_DIRECTORY, '');
+    this.appVersion = this.bundleVersion();
+    this.updates = new DesktopUpdateService(this.shell, this.prefs, () => {
+      this.syncUpdateState();
+    });
+    // 上游壳启动即开始轮询；这里同样在过期时开始（最后一次成功检查超过一个间隔才算过期）。
+    this.updates.startIfDue();
+    host.eventHub.on(DESKTOP_QUIT_REQUEST, () => {
+      this.quitVisible = true;
+    });
+    // 外观跟随系统时，系统深浅色一变就重算令牌
+    host.eventHub.on(DESKTOP_CONFIG_CHANGED, () => {
+      this.applyAppearance();
+    });
+    // 窗口装饰状态：系统标题栏没能藏掉时，隐藏自绘品牌标（避免同一枚 logo 出现两次）
+    host.eventHub.on(DESKTOP_CHROME_CHANGED, (decorVisible: boolean) => {
+      this.systemDecorVisible = decorVisible === true;
+    });
+    // 通知 Ability：页面已就绪，关闭窗口时可以先弹确认
+    host.eventHub.emit(DESKTOP_PAGE_READY);
+    // 标题栏三键（自绘）需要知道窗口是否已最大化
+    this.bindWindowStatus(host);
+  }
+
+  /** 应用版本（对应上游关于面板的 applicationVersion，取自包信息）。 */
+  private bundleVersion(): string {
+    try {
+      const info: bundleManager.BundleInfo =
+        bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      return info.versionName;
+    } catch (e) {
+      return '1.0.0';
+    }
+  }
+
+  /** 当前展开的菜单（无则返回空菜单，UI 不会空指针）。 */
+  private activeMenu(): MenuSpec {
+    const found: MenuSpec | null = this.shell.menu(this.openMenuId);
+    return found === null ? new MenuSpec('', '') : found;
+  }
+
+  /** 契约里的键名（用于真实的快捷键注册；空则回落到 W，保证注册一定成立）。 */
+  private shortcutKey(id: string): string {
+    const spec = this.shell.shortcut(id);
+    if (spec === null || spec.key.length === 0) {
+      return 'W';
+    }
+    return spec.key;
+  }
+
+  /** 菜单分发：与上游 applicationItems/fileMenu 的动作一一对应。 */
+  private handleMenuAction(itemId: string): void {
+    this.openMenuId = '';
+    if (itemId === 'about') {
+      this.aboutVisible = true;
+      return;
+    }
+    if (itemId === 'checkUpdates') {
+      this.checkUpdates();
+      return;
+    }
+    if (itemId === 'quit') {
+      this.quitVisible = true;
+      return;
+    }
+    if (itemId === 'reloadPage') {
+      this.reloadView();
+      return;
+    }
+    if (itemId === 'toggleFullscreen') {
+      this.toggleFullscreen();
+      return;
+    }
+    if (itemId === 'openDownloadPage') {
+      this.openDownloadPage();
+      return;
+    }
+    if (itemId === 'pickDirectory') {
+      this.pickWorkspaceDirectory();
+      return;
+    }
+    if (itemId === 'restartAppHost') {
+      // 鸿蒙端 dsh 服务由终端/HNP 侧启动，壳无权重启 → 明说，不假装成功。
+      this.toast('请在终端重启 dsh 服务后重新连接（dsh 不在应用进程内）');
+      return;
+    }
+    if (itemId === 'hideApplication') {
+      this.minimizeWindow();
+      return;
+    }
+    if (itemId === 'hideOtherApplications' || itemId === 'showAllApplications') {
+      this.minimizeWindow();
+      return;
+    }
+    // 编辑类条目：鸿蒙文本组件自管编辑历史，壳无法注入按键（上游是 sendEditingKey）。
+    this.toast('请在输入框内使用系统快捷键完成「' + itemId + '」');
+  }
+
+  /** 检查更新：立刻显示「检查中」，完成后按状态机刷新文案。 */
+  private checkUpdates(): void {
+    this.updateVisible = true;
+    const service: DesktopUpdateService | null = this.updates;
+    if (service === null) {
+      this.updatePhase = DesktopUpdatePhase.ERROR;
+      this.updateTitle = this.desktopCopy.updateCheckFailedTitle;
+      this.updateMessage = this.desktopCopy.updateCheckFailed;
+      return;
+    }
+    this.updateTitle = this.desktopCopy.updateCheckTitle;
+    this.updateMessage = this.desktopCopy.updateChecking;
+    service.checkNow().then(() => {
+      this.syncUpdateState();
+    }).catch(() => {
+      this.syncUpdateState();
+    });
+    this.syncUpdateState();
+  }
+
+  /** 把服务状态投影成面板文案（与上游 update-presentation 的职责一致）。 */
+  private syncUpdateState(): void {
+    const service: DesktopUpdateService | null = this.updates;
+    if (service === null) {
+      return;
+    }
+    const phase: string = service.phase();
+    this.updatePhase = phase;
+    const baseline: string = service.baselineVersion();
+    if (phase === DesktopUpdatePhase.AVAILABLE) {
+      this.updateTitle = this.desktopCopy.updateAvailable;
+      this.updateMessage = '上游已发布 V' + service.latestVersion() + '（本适配基线 V' + baseline + '）';
+      this.updateDetail = '鸿蒙端暂不支持应用内安装（Electron 更新包不可用），请前往官网下载或等待本仓库适配更新。';
+    } else if (phase === DesktopUpdatePhase.CURRENT) {
+      this.updateTitle = this.desktopCopy.updateCheckTitle;
+      this.updateMessage = DesktopCopy.placeholder(this.desktopCopy.updateCurrent, 'version', baseline);
+      this.updateDetail = '';
+    } else if (phase === DesktopUpdatePhase.ERROR) {
+      this.updateTitle = this.desktopCopy.updateCheckFailedTitle;
+      this.updateMessage = service.lastFailureKind() === 'check-network'
+        ? this.desktopCopy.updateCheckNetworkFailed : this.desktopCopy.updateCheckFailed;
+      this.updateDetail = '';
+    } else if (phase === DesktopUpdatePhase.CHECKING) {
+      this.updateTitle = this.desktopCopy.updateCheckTitle;
+      this.updateMessage = this.desktopCopy.updateChecking;
+      this.updateDetail = '';
+    } else {
+      this.updateTitle = this.desktopCopy.updateCheckTitle;
+      this.updateMessage = DesktopCopy.placeholder(this.desktopCopy.updateCurrent, 'version', baseline);
+      this.updateDetail = '';
+    }
+  }
+
+  /** 技术详情：只放可核对的事实，不放凭据（对齐上游「主进程诊断」的克制）。 */
+  private updateTechnical(): string {
+    const service: DesktopUpdateService | null = this.updates;
+    if (service === null) {
+      return '';
+    }
+    const lines: string[] = [];
+    lines.push('清单：' + service.manifestUrl());
+    lines.push('适配基线：V' + service.baselineVersion());
+    const latest: string = service.latestVersion();
+    if (latest.length > 0) {
+      lines.push('上游最新：V' + latest);
+    }
+    const last: number = service.lastCheckTime();
+    if (last > 0) {
+      lines.push('上次成功检查：' + new Date(last).toISOString());
+    }
+    const failure: string = service.lastFailureMessage();
+    if (failure.length > 0) {
+      lines.push('失败原因：' + failure);
+    }
+    return lines.join('\n');
+  }
+
+  /** 关闭决定：交给 Ability 决定是否真的退出（对应上游 quit-confirmation 的确认路径）。 */
+  private decideQuit(allow: boolean): void {
+    this.quitVisible = false;
+    if (!allow) {
+      return;
+    }
+    const host = this.getUIContext().getHostContext();
+    if (host === undefined || host === null) {
+      return;
+    }
+    host.eventHub.emit(DESKTOP_QUIT_DECISION, true);
+  }
+
+  /** 退出确认正文：有任务在跑就说会中断（与上游 inspectQuit 的两种文案对应）。 */
+  private quitBody(): string {
+    return this.streaming ? this.desktopCopy.quitActiveTasks : this.desktopCopy.quitScheduledTasks;
+  }
+
+  /** 刷新页面：重新建立连接并重载会话（上游 role: 'reload' 的鸿蒙等价物）。 */
+  private reloadView(): void {
+    if (this.mode === 'dsh') {
+      this.connect();
+      this.toast('已重新连接 dsh 服务');
+    } else {
+      this.toast('直连模式无需刷新');
+    }
+  }
+
+  /**
+   * 最大化 / 还原切换（上游 Windows 标题栏该键由系统绘制，鸿蒙端自绘）。
+   * 官方《自由窗口下如何自定义窗口标题栏》给的写法就是 `maximize()` / `recover()`，
+   * 而不是 `setWindowLayoutFullScreen()`（后者只改内容布局，不改变窗口状态，
+   * 点了会让人以为「回不到小窗口」）。
+   */
+  private toggleFullscreen(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (context === undefined || context === null) {
+      return;
+    }
+    window.getLastWindow(context).then((mainWindow: window.Window) => {
+      if (this.windowMaximized) {
+        mainWindow.recover().catch((error: BusinessError) => {
+          this.toast('还原窗口失败：' + error.message);
+        });
+        return;
+      }
+      // 最大化时禁止系统标题栏随光标 hover 弹出来盖住自绘标题栏（API 20 起）
+      if (deviceInfo.sdkApiVersion >= 20) {
+        mainWindow.setTitleAndDockHoverShown(false, true).catch(() => {
+        });
+      }
+      mainWindow.maximize().catch((error: BusinessError) => {
+        this.toast('最大化失败：' + error.message);
+      });
+    }).catch((error: BusinessError) => {
+      this.toast('无法获取窗口：' + error.message);
+    });
+  }
+
+  /** 订阅窗口状态：最大化/还原后标题栏键位与字形要跟着变（也用于几何落盘时跳过铺满状态）。 */
+  private bindWindowStatus(host: common.Context): void {
+    window.getLastWindow(host).then((mainWindow: window.Window) => {
+      const sync = (status: window.WindowStatusType): void => {
+        this.windowMaximized = status === window.WindowStatusType.MAXIMIZE
+          || status === window.WindowStatusType.FULL_SCREEN;
+      };
+      try {
+        sync(mainWindow.getWindowStatus());
+      } catch (e) {
+        hilog.warn(0x0000, 'DshIndex', 'getWindowStatus failed: %{public}s', String(e));
+      }
+      mainWindow.on('windowStatusChange', sync);
+    }).catch(() => {
+    });
+  }
+
+  /** 最小化窗口（上游「隐藏应用」的鸿蒙等价物：没有托盘，最小化就是「退到后台」）。 */
+  private minimizeWindow(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (context === undefined || context === null) {
+      return;
+    }
+    window.getLastWindow(context).then((mainWindow: window.Window) => {
+      mainWindow.minimize().catch((error: BusinessError) => {
+        this.toast('最小化失败：' + error.message);
+      });
+    }).catch((error: BusinessError) => {
+      this.toast('无法获取窗口：' + error.message);
+    });
+  }
+
+  /** 打开下载页（上游「前往官网下载」的鸿蒙等价物：交给系统浏览器）。 */
+  private openDownloadPage(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (context === undefined || context === null) {
+      return;
+    }
+    const want: Want = {
+      action: 'ohos.want.action.viewData',
+      entities: ['entity.system.browsable'],
+      uri: this.shell.update.downloadPage
+    };
+    context.startAbility(want).catch((error: BusinessError) => {
+      this.toast('无法打开浏览器：' + error.message);
+    });
+  }
+
+  /** 选择工作目录（上游 directory-picker 的鸿蒙等价物）。 */
+  private pickWorkspaceDirectory(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    if (context === undefined || context === null) {
+      return;
+    }
+    DesktopDirectoryPicker.pick(context).then((result) => {
+      if (result.error.length > 0) {
+        this.toast(this.desktopCopy.pickDirectoryFailed + ' ' + result.error);
+        return;
+      }
+      if (result.canceled) {
+        return;
+      }
+      this.workspaceDirectory = result.path;
+      const prefs: DesktopPrefs | null = this.prefs;
+      if (prefs !== null) {
+        prefs.putString(DesktopPrefKeys.WORKSPACE_DIRECTORY, result.path);
+      }
+      this.toast('工作目录已设为：' + result.path);
+    });
+  }
+
+  private toast(message: string): void {
+    // showToast 会抛异常（窗口未就绪等），提示失败不该影响交互
+    try {
+      this.getUIContext().getPromptAction().showToast({ message: message, duration: 2200 });
+    } catch (e) {
+      hilog.warn(0x0000, 'DshIndex', 'toast failed: %{public}s', String(e));
+    }
+  }
+
   // —— UI ——
 
-  @Builder
-  settingsSheet() {
-    SettingsPanel({
-      serverUrl: this.serverUrl,
-      connected: this.connected,
-      statusText: this.statusText,
-      presetIds: this.presetIds,
-      currentPreset: this.currentPreset,
-      client: this.client,
-      mode: this.mode,
-      directApiKey: this.directApiKey,
-      directModel: this.directModel,
-      directModels: this.directModels,
-      onModeChange: (m: string) => {
-        this.mode = m;
-        this.saveMode(m);
-        if (m === 'dsh') {
-          // 切到 dsh 模式：清空直连本地消息，连接后自动加载服务端会话
-          this.deepseek.stop();
-          this.messages = [];
-          this.currentTitle = '';
-        }
-        this.applyMode();
-      },
-      onSaveDirect: (key: string, model: string) => {
-        this.directApiKey = key;
-        this.directModel = model;
-        this.saveDirectConfig();
-      },
-      onSave: (url: string) => {
-        this.serverUrl = url;
-        this.saveServerUrl();
-        this.connect();
-      },
-      onPresetSelect: (preset: string) => {
-        this.currentPreset = preset;
-        this.saveAgentPreset(preset);
-      },
-      onClose: () => {
-        this.showSettings = false;
-      }
-    })
-    .height('100%')
-    .width('100%')
+  /** 侧栏是否折叠：手动覆盖优先，否则按上游 1024 断点自动收起。 */
+  private sidebarCollapsed(): boolean {
+    if (this.sidebarOverride >= 0) {
+      return this.sidebarOverride === 1;
+    }
+    return this.windowWidth < Theme.SIDEBAR_AUTO_COLLAPSE;
+  }
+
+  /** --dsh-chat-content-width 的求解输入：会话主列实际宽度。 */
+  private chatColumnWidth(): number {
+    return Math.max(320, this.windowWidth - (this.sidebarCollapsed() ? Theme.SIDEBAR_COLLAPSED : Theme.SIDEBAR_DEFAULT));
   }
 
   build() {
-    Row() {
-      Sidebar({
-        sessions: $sessions,
-        currentSessionId: this.currentSessionId,
-        connected: this.connected,
-        statusText: this.statusText,
-        directMode: this.mode === 'direct',
-        onSelect: (id: string) => { this.selectSession(id); },
-        onNew: () => { this.newSession(); },
-        onSettings: () => {
-          this.showSettings = true;
-          this.loadPresets();
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column() {
+        // 桌面壳：Windows 形态标题栏（40px / 左侧菜单 / 右侧窗口按钮），与上游 preload-menu 同一套几何
+        DesktopMenuBar({
+          menus: this.shell.menus,
+          shortcuts: this.shell.shortcuts,
+          messages: this.desktopCopy,
+          openMenuId: this.openMenuId,
+          menuStart: this.sidebarCollapsed() ? Theme.WINDOWS_MENU_START_COLLAPSED : Theme.WINDOWS_MENU_START,
+          collapsed: this.sidebarCollapsed(),
+          maximized: this.windowMaximized,
+          onToggleSidebar: () => {
+            this.sidebarOverride = this.sidebarCollapsed() ? 0 : 1;
+          },
+          onNewSession: () => {
+            this.newSession();
+          },
+          onMenuMeasure: (menuId: string, x: number) => {
+            this.menuAnchors.set(menuId, x);
+          },
+          onMinimize: () => {
+            this.minimizeWindow();
+          },
+          onToggleMaximize: () => {
+            this.toggleFullscreen();
+          },
+          onClose: () => {
+            this.quitVisible = true;
+          },
+          onToggle: (menuId: string) => {
+            if (this.openMenuId === menuId) {
+              this.openMenuId = '';
+              return;
+            }
+            const measured: number | undefined = this.menuAnchors.get(menuId);
+            this.menuAnchorX = measured === undefined ? 8 : measured;
+            this.openMenuId = menuId;
+          }
+        })
+
+        // 三栏骨架（AppFrame）：侧栏 + 会话主列；Windows 形态下主列带 16px 左上圆角并自带底色
+        Row() {
+          Sidebar({
+            sessions: $sessions,
+            currentSessionId: this.currentSessionId,
+            connected: this.connected,
+            collapsed: this.sidebarCollapsed(),
+            // 系统标题栏仍可见（隐藏失败）时不再自绘品牌标：同一枚 logo 只出现一次
+            hideBrand: this.systemDecorVisible,
+            workspaceName: this.workspaceName(),
+            onSelect: (id: string) => { this.selectSession(id); },
+            onNew: () => { this.newSession(); },
+            onSettings: () => {
+              this.showSettings = true;
+              this.loadPresets();
+            },
+            onToggle: () => {
+              this.sidebarOverride = this.sidebarCollapsed() ? 0 : 1;
+            }
+          })
+
+          Column() {
+            ChatView({
+              title: this.currentTitle,
+              messages: $messages,
+              streaming: this.streaming,
+              connected: this.connected,
+              directMode: this.mode === 'direct',
+              modelLabel: this.modelLabel(),
+              presetLabel: this.presetLabel(),
+              workspaceName: this.workspaceLabel(),
+              workspacePath: this.currentWorkspacePath(),
+              statusText: this.statusText,
+              columnWidth: this.chatColumnWidth(),
+              scroller: this.scroller,
+              workspaceOptions: this.workspaceOptions,
+              workspaceAvailable: this.workspaceAvailable(),
+              workspaceReason: this.workspaceReason(),
+              presetIds: this.presetIds,
+              presetNames: this.presetNames,
+              presetDescription: this.presetDescription(),
+              presetLocked: this.presetLocked(),
+              modelKeys: this.modelKeys,
+              modelKey: this.currentModelKey,
+              hint: this.heroHint(),
+              permissionOptions: this.permissionOptions,
+              permissionLabel: this.currentPermission,
+              permissionReason: this.permissionReason(),
+              permissionEnabled: this.permissionEnabled(),
+              onSend: (text: string) => { this.sendMessage(text); },
+              onStop: () => { this.stopGeneration(); },
+              onPickModel: (key: string) => { this.pickModel(key); },
+              onOpenModelSettings: () => {
+                this.showSettings = true;
+                this.loadPresets();
+              },
+              onCopy: (text: string) => { this.copyToClipboard(text); },
+              onOpenWorkspace: () => { this.pickWorkspaceDirectory(); },
+              onPickWorkspace: (path: string) => { this.pickWorkspace(path); },
+              onPickPreset: (preset: string) => { this.pickPreset(preset); },
+              onPickPermission: (preset: string) => { this.pickPermission(preset); },
+              onSwitchToDsh: () => { this.switchToDshMode(); }
+            })
+          }
+          .layoutWeight(1)
+          .height('100%')
+          .backgroundColor(Theme.palette(this.dark).dswAliasBgBase)
+          .borderRadius({ topLeft: Theme.WINDOWS_CONTENT_RADIUS })
+          .clip(true)
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .onClick(() => {
+          this.openMenuId = '';
+        })
+      }
+      .width('100%')
+      .height('100%')
+      // Windows 形态：标题栏与侧栏同底（--dsw-specific-sidebar-fill）
+      .backgroundColor(Theme.palette(this.dark).dswSpecificSidebarFill)
+      .onAreaChange((oldArea: Area, newArea: Area) => {
+        const raw: Length | undefined = newArea.width;
+        if (raw === undefined) {
+          return;
+        }
+        const width: number = Number(raw.toString());
+        if (Number.isFinite(width) && width > 0) {
+          this.windowWidth = width;
         }
       })
-      ChatView({
-        title: this.currentTitle,
-        messages: $messages,
-        streaming: this.streaming,
-        connected: this.connected,
-        directMode: this.mode === 'direct',
-        scroller: this.scroller,
-        onSend: (text: string) => { this.sendMessage(text); },
-        onStop: () => { this.stopGeneration(); }
-      })
+
+      // 菜单下拉层：点击空白处关闭
+      if (this.openMenuId !== '') {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('rgba(0,0,0,0.01)')
+          .position({ x: 0, y: DESKTOP_MENUBAR_HEIGHT })
+          .onClick(() => {
+            this.openMenuId = '';
+          })
+        Column() {
+          DesktopMenuDropdown({
+            menu: this.activeMenu(),
+            shortcuts: this.shell.shortcuts,
+            messages: this.desktopCopy,
+            onAction: (itemId: string) => {
+              this.handleMenuAction(itemId);
+            }
+          })
+        }
+        .alignItems(HorizontalAlign.Start)
+        .position({ x: this.menuAnchorX, y: DESKTOP_MENUBAR_HEIGHT })
+      }
+
+      // 设置：上游为 800x800 居中面板 + bg-mask-1 遮罩（不再用系统半模态弹窗）
+      if (this.showSettings) {
+        Column() {
+          SettingsPanel({
+            serverUrl: this.serverUrl,
+            connected: this.connected,
+            statusText: this.statusText,
+            presetIds: this.presetIds,
+            currentPreset: this.currentPreset,
+            client: this.client,
+            mode: this.mode,
+            directApiKey: this.directApiKey,
+            directModel: this.directModel,
+            directModels: this.directModels,
+            directBaseUrl: this.directBaseUrl,
+            appearance: this.appearance,
+            contentFontSize: this.contentFontSize,
+            appVersion: this.appVersion,
+            baselineVersion: this.shell.upstream.appVersion,
+            onModeChange: (m: string) => {
+              this.mode = m;
+              this.saveMode(m);
+              if (m === 'dsh') {
+                this.deepseek.stop();
+                this.messages = [];
+                this.currentTitle = '';
+              }
+              this.applyMode();
+            },
+            onSaveDirect: (key: string, model: string, baseUrl: string) => {
+              this.directApiKey = key;
+              this.directModel = model;
+              this.directBaseUrl = baseUrl;
+              this.deepseek.setEndpoint(baseUrl);
+              this.syncDirectModelKeys();
+              this.saveDirectConfig();
+            },
+            onSave: (url: string) => {
+              this.serverUrl = url;
+              this.saveServerUrl();
+              this.connect();
+            },
+            onPresetSelect: (preset: string) => {
+              this.currentPreset = preset;
+              this.saveAgentPreset(preset);
+            },
+            onAppearanceChange: (value: string) => {
+              this.saveAppearance(value);
+            },
+            onFontSizeChange: (size: number) => {
+              this.saveContentFontSize(size);
+            },
+            onClose: () => {
+              this.showSettings = false;
+            }
+          })
+          .height('100%')
+          .width('100%')
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .padding(24)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgMask1)
+        .onClick(() => {
+          this.showSettings = false;
+        })
+      }
+
+      // 关于面板（上游 about-panel 的鸿蒙自绘版）
+      if (this.aboutVisible) {
+        Column() {
+          DesktopAboutPanel({
+            productName: this.desktopCopy.aboutProduct,
+            versionLabel: DesktopCopy.placeholder(this.desktopCopy.aboutVersion, 'version', this.appVersion),
+            appVersion: this.appVersion,
+            baselineVersion: this.shell.upstream.appVersion,
+            upstreamCommit: this.shell.upstream.commit,
+            hostProtocolVersion: this.shell.upstream.hostProtocolVersion,
+            contractSource: this.shell.loadError.length > 0
+              ? ('内置默认值（契约读取失败：' + this.shell.loadError + '）')
+              : ('rawfile/' + DesktopShellContract.RAWFILE + ' @ ' + this.shell.upstream.branch),
+            messages: this.desktopCopy,
+            onClose: () => {
+              this.aboutVisible = false;
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgMask3)
+      }
+
+      // 退出确认（上游 quit-confirmation：区分「任务中断」与「定时任务不跑」）
+      if (this.quitVisible) {
+        Column() {
+          DesktopQuitConfirmPanel({
+            title: this.desktopCopy.quitTitle,
+            body: this.quitBody(),
+            confirmLabel: this.desktopCopy.quit,
+            cancelLabel: this.desktopCopy.cancel,
+            onCancel: () => {
+              this.quitVisible = false;
+            },
+            onConfirm: () => {
+              this.decideQuit(true);
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgMask3)
+      }
+
+      // 权限风险确认（上游 RiskConfirmation：完全权限 / Auto review 先勾选再启用）
+      if (this.permissionRiskVisible) {
+        Column() {
+          DesktopPermissionRiskPanel({
+            title: this.permissionRiskTitle,
+            body: this.permissionRiskBody,
+            acknowledgeLabel: Constants.PERMISSION_ACK,
+            confirmLabel: this.permissionRiskConfirm,
+            cancelLabel: Constants.PERMISSION_CANCEL,
+            acknowledged: this.permissionRiskAck,
+            onAcknowledge: (value: boolean) => {
+              this.permissionRiskAck = value;
+            },
+            onCancel: () => {
+              this.permissionRiskVisible = false;
+              this.permissionRiskAck = false;
+            },
+            onConfirm: () => {
+              const preset: string = this.permissionRiskValue;
+              this.permissionRiskVisible = false;
+              this.permissionRiskAck = false;
+              this.commitPermission(preset);
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgMask3)
+      }
+
+      // 更新面板（上游 update-dialog：同一套状态机文案）
+      if (this.updateVisible) {
+        Column() {
+          DesktopUpdatePanel({
+            title: this.updateTitle,
+            message: this.updateMessage,
+            detail: this.updateDetail,
+            technical: this.updateTechnical(),
+            showTechnical: this.showUpdateTechnical,
+            busy: this.updatePhase === DesktopUpdatePhase.CHECKING,
+            canDownload: this.updatePhase === DesktopUpdatePhase.AVAILABLE,
+            downloadLabel: this.updatePhase === DesktopUpdatePhase.AVAILABLE
+              ? this.desktopCopy.updateDownload : this.desktopCopy.updateCheckTitle,
+            closeLabel: this.desktopCopy.updateLater,
+            onCheck: () => {
+              this.checkUpdates();
+            },
+            onDownload: () => {
+              this.openDownloadPage();
+            },
+            onToggleTechnical: () => {
+              this.showUpdateTechnical = !this.showUpdateTechnical;
+            },
+            onClose: () => {
+              this.updateVisible = false;
+            }
+          })
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+        .backgroundColor(Theme.palette(this.dark).dswAliasBgMask3)
+      }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(Theme.COLOR_BG)
-    // 设置：由下而上鸿蒙半模态弹窗（沉浸光感 + 挡位 + 拖动条）
-    .bindSheet($$this.showSettings, this.settingsSheet(), {
-      height: SheetSize.LARGE,
-      detents: [SheetSize.MEDIUM, SheetSize.LARGE],
-      preferType: SheetType.BOTTOM,
-      blurStyle: BlurStyle.Thick,
-      dragBar: true,
-      showClose: true,
-      backgroundColor: Theme.GLASS_HEADER,
-      onWillDismiss: (dismissSheetAction: DismissSheetAction) => {
-        this.showSettings = false;
-        dismissSheetAction.dismiss();
-      }
+    // 壳层快捷键：定义来自 desktop-shell.json（菜单提示与真实注册共用一份）
+    .keyboardShortcut(this.shortcutKey('closePage'), [ModifierKey.CTRL], () => {
+      this.quitVisible = true;
     })
+    .keyboardShortcut(this.shortcutKey('reloadPage'), [ModifierKey.CTRL], () => {
+      this.reloadView();
+    })
+    // 功能键必须走 FunctionKey 枚举（ArkUI 限制）；契约里的 'F11' 用于菜单提示
+    .keyboardShortcut(FunctionKey.F11, [], () => {
+      this.toggleFullscreen();
+    })
+  }
+
+  /**
+   * 模型标签（输入行右侧胶囊）：独立模式 = 本机模型；dsh 模式 = 当前会话的模型
+   * （modelSelection 投影）→ 服务端目录默认项 → 占位。**不再拿对话模式冒充模型**：
+   * 模式有自己的胶囊（在工具排里），这里只讲模型。
+   */
+  private modelLabel(): string {
+    if (this.mode === 'direct') {
+      return this.directModel;
+    }
+    const session: DshSession | null = this.currentSession();
+    if (session !== null && session.model.length > 0) {
+      return session.model;
+    }
+    if (this.catalogDefaultModel.length > 0) {
+      const parts: string[] = this.catalogDefaultModel.split('/');
+      return parts.length > 1 ? parts[1] : this.catalogDefaultModel;
+    }
+    return '选择模型';
+  }
+
+  /** 模型胶囊：选中一个模型（独立模式改本地配置；dsh 模式走 session/selectModel）。 */
+  private pickModel(key: string): void {
+    if (this.mode === 'direct') {
+      this.directModel = key;
+      this.currentModelKey = key;
+      this.saveDirectConfig();
+      this.toast('模型已设为：' + key);
+      return;
+    }
+    const parts: string[] = key.split('/');
+    if (parts.length < 2) {
+      return;
+    }
+    const client = this.client;
+    if (client === null || this.currentSessionId.length === 0) {
+      this.toast('请先选中一个会话再切换模型');
+      return;
+    }
+    const previous: string = this.currentModelKey;
+    this.currentModelKey = key;
+    client.selectModel(this.currentSessionId, parts[0], parts[1], '').then(() => {
+      this.toast('模型已切换：' + parts[0] + ' / ' + parts[1]);
+      this.refreshSessions();
+    }).catch((e: BusinessError) => {
+      this.currentModelKey = previous;
+      this.toast('切换模型失败：' + String(e));
+    });
+  }
+
+  /** 工作区胶囊是否可点：只有 dsh 服务模式才有会话工作区。 */
+  private workspaceAvailable(): boolean {
+    return this.mode !== 'direct' && this.connected;
+  }
+
+  /** 工作区胶囊不可用的原因。 */
+  private workspaceReason(): string {
+    if (this.mode === 'direct') {
+      return '独立模式不绑定 dsh 工作区（想给 AI 指定目录请切到 dsh 服务模式）';
+    }
+    return '未连接 dsh 服务：先在设置里确认服务地址';
+  }
+
+  /**
+   * 卡下提示（hero 相位）：把「为什么发不出去」说清楚。
+   * 独立模式缺 API Key / dsh 模式没连上，各给一句能照做的指引。
+   */
+  private heroHint(): string {
+    if (this.mode === 'direct') {
+      if (this.directApiKey.length === 0) {
+        return '独立模式：设置 →「模型与连接」填 API Key 即可开聊；对话模式已随包内置，不需要部署服务。';
+      }
+      return '';
+    }
+    if (!this.connected) {
+      return 'dsh 服务模式未连接：设置 →「模型与连接」确认服务地址（默认 http://127.0.0.1:3080），'
+        + '或在鸿蒙终端运行 sh ~/bin/dsh-web.sh。';
+    }
+    return '';
+  }
+
+  /** 工作区标签：选过目录显示目录名，否则显示应用名（上游工作区胶囊）。 */
+  private workspaceName(): string {
+    const dir: string = this.workspaceDirectory;
+    if (dir.length === 0) {
+      return Constants.APP_NAME;
+    }
+    return Index.basename(dir);
+  }
+
+  /**
+   * 首页工作区胶囊的标签（上游 EmptyHero 的 workspaceLabel）：
+   * 手选目录优先，其次当前会话的 cwd；都没有 → 空串，由 Chip 显示「选择工作区」占位。
+   */
+  private workspaceLabel(): string {
+    if (this.workspaceDirectory.length > 0) {
+      return Index.basename(this.workspaceDirectory);
+    }
+    for (let i = 0; i < this.sessions.length; i++) {
+      if (this.sessions[i].sessionId === this.currentSessionId && this.sessions[i].cwd.length > 0) {
+        return Index.basename(this.sessions[i].cwd);
+      }
+    }
+    return '';
+  }
+
+  /** 当前生效的工作区路径（手选目录优先，其次当前会话 cwd） */
+  private currentWorkspacePath(): string {
+    if (this.workspaceDirectory.length > 0) {
+      return this.workspaceDirectory;
+    }
+    for (let i = 0; i < this.sessions.length; i++) {
+      if (this.sessions[i].sessionId === this.currentSessionId) {
+        return this.sessions[i].cwd;
+      }
+    }
+    return '';
+  }
+
+  /** 路径末段（工作区胶囊显示的目录名） */
+  private static basename(dir: string): string {
+    const parts: string[] = dir.split('/');
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (parts[i].length > 0) {
+        return parts[i];
+      }
+    }
+    return dir;
+  }
+
+  /** 复制到剪贴板（消息动作排，对应上游 MessageIconActions 的复制）。 */
+  private copyToClipboard(text: string): void {
+    if (text.length === 0) {
+      return;
+    }
+    try {
+      const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+      pasteboard.getSystemPasteboard().setData(data).then(() => {
+        this.toast('已复制');
+      }).catch(() => {
+      });
+    } catch (e) {
+      // 剪贴板不可用时静默失败（不打断会话）
+    }
   }
 }

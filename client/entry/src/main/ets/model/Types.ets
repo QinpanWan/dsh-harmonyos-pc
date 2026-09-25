@@ -29,6 +29,8 @@ export class ChatMessage {
 
 /**
  * 会话摘要（session.list 返回项的 UI 投影）
+ * 除标题外还携带「工作区（cwd）/ 工作区权限（permissions 投影）/ 对话模式（agentPreset 投影）」，
+ * 首页的三个选择器都读这三个字段（对应上游 sidebar 的 cwd 与 Session 投影）。
  */
 @Observed
 export class DshSession {
@@ -37,6 +39,16 @@ export class DshSession {
   updatedAt: number = 0;
   running: boolean = false;
   blank: boolean = true;
+  /** 会话工作目录（工作区）；空串表示服务端默认目录 */
+  cwd: string = '';
+  /** 当前工作区权限预设（permissions 投影 currentValue） */
+  permission: string = '';
+  /** 该会话创建时绑定的对话模式（agentPreset 投影） */
+  agentPreset: string = '';
+  /** 该会话当前使用的模型（modelSelection 投影 lastUsed / next）；空串表示未知 */
+  model: string = '';
+  /** 该会话模型所属 provider（与 model 成对，session/selectModel 需要） */
+  modelProvider: string = '';
 
   constructor(id: string) {
     this.sessionId = id;
