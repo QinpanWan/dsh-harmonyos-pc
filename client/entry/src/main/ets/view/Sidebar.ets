@@ -148,7 +148,7 @@ export struct Sidebar {
             ListItem() {
               this.sessionRow(item)
             }
-          }, (item: DshSession) => item.sessionId)
+          }, (item: DshSession) => Sidebar.rowKey(item, this.currentSessionId))
         }
         .width('100%')
         .layoutWeight(1)
@@ -169,6 +169,18 @@ export struct Sidebar {
       .height(6)
       .borderRadius(3)
       .backgroundColor(color)
+  }
+
+  /**
+   * ForEach 的行键：**必须把「这一行画什么」都编进键里**。
+   * ArkUI 的 ForEach 只按键做 diff —— 键没变就复用旧行、不重绘，而 `DshSession` 是普通
+   * 类实例、行内容又是本组件内的 @Builder（没有 @ObjectLink 可绑定），所以光靠换数组
+   * 是刷不出「标题刚从 `session/title` 来 / 运行点亮了 / 时间前移了 / 选中态换了」的。
+   * 把标题 + 运行位 + 时间 + 选中态并进键，任何一项变了就重建这一行（一次事件只重建一行，量很小）。
+   */
+  private static rowKey(item: DshSession, currentSessionId: string): string {
+    return item.sessionId + '|' + item.title + '|' + item.updatedAt.toString()
+      + '|' + (item.running ? '1' : '0') + '|' + (item.sessionId === currentSessionId ? '1' : '0');
   }
 
   @Builder

@@ -61,7 +61,16 @@ sh ~/bin/dsh-daemon-runner.py
 
 ```
 [huawei-devdocs] 已加载: enforce=strict, maxInjections=2, catalogs=5 (harmonyos-guides,harmonyos-references,...)
+[huawei-devdocs] 已全局注册 4 个工具: huawei_devdocs_search/get/catalog/status
 ```
+
+> **工具注册方式（dsh ≥ 0.1.6-alpha.1 必读）**：四个工具在插件 `apply` 阶段用
+> `ctx.tools.register(...)` **全局注册**（与 `dsh-huawei-local-llm` / `dsh-self-evolve` 同款）。
+> 0.1.6-alpha.1 起，宿主平面的 patch-insert 插件**收不到 `agent/created`**，
+> 旧版「每 agent 创建时注册」的写法会静默失效：`[huawei-devdocs] 已加载` 照常打印、
+> 但 `request/header.tools` 里 `huawei_devdocs_*` 全缺（模型看不到工具）。代码里保留的
+> per-agent 注册只作回退，仍向宿主平面派发该事件的部署可用。
+> 排查方法：新建会话发一句话，再看该会话 `session.v3.jsonl.zstd` 里的 `request/header` 工具表。
 
 ## 环境变量
 
@@ -92,6 +101,10 @@ node scripts/verify.mjs --live  # 真实后端：连通性 + 全分类索引 + �
 - 搜索报错/超时：先跑 `huawei_devdocs_status` 看 `probe`；确认网络可访问 `svc-drcn.developer.huawei.com`
   （个别网络需放行该域或关代理拦截）。有旧缓存时搜索会自动降级为缓存结果并在 note 中标注「缓存降级」。
 - 强制守卫误报/漏报：检测词表在 `lib/enforce.js`（`STRONG_PATTERNS` / `WEAK_PATTERNS`），可自行增删。
+- 工具不在模型工具表里（dsh ≥ 0.1.6-alpha.1 的典型症状：插件日志「已加载」但模型看不到 `huawei_devdocs_*`）：
+  确认启动日志有 `[huawei-devdocs] 已全局注册 4 个工具`；缺失说明 `ctx.tools` 未就绪或
+  `inject` 未含 `"tools"`。不要把插件写进 `dsh.profile.bundles`——它不是 bundle，
+  写进去会让 profile 直接启动失败（`declares no dsh.bundle in its package.json`）。
 - 想彻底关掉强制：设 `HUAWEI_DEVDOCS_ENFORCE=off` 后重启。
 - 缓存损坏/过期：删 `~/.dsh/cache/huawei-devdocs/*.json` 后重新搜索即重建。
 - 该插件依赖的官方 REST 接口即官网页面本身使用的接口；若华为调整接口，工具会报错并可据

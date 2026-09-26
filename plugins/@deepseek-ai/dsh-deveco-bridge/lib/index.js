@@ -4,14 +4,21 @@ import { stat, readdir } from "node:fs/promises";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import { runCommand, TOOLS } from "./runner.js";
+import {
+  detectBuildDefaults,
+  detectProjectApi,
+  listToolchains,
+  normalizeProjectToApi26,
+  resolveToolchain,
+  restoreProjectToApi23,
+  selectToolchain
+} from "./toolchains.js";
 
 /** Cordis plugin name used by loader diagnostics. */
 const name = "deveco-bridge";
 /** Services required by the tools. */
 const inject = ["tools"];
 
-const NODE_BIN = `${TOOLS.nodeHome}/bin/node`;
-const HVIGOR_JS = `${TOOLS.hvigorHome}/bin/hvigorw.js`;
 const PYTHON_BIN = TOOLS.pythonBin ?? "python3";
 
 function formatResult(value) {
@@ -96,33 +103,167 @@ function assemble(label, steps) {
   };
 }
 
+/** Human-readable report of every installed toolchain, plus this project's choice. */
+async function describeToolchains(project) {
+  const list = await listToolchains();
+  const lines = ["工具链:"];
+  for (const tc of list) {
+    const ver = [
+      tc.hvigorVersion && `hvigor ${tc.hvigorVersion}`,
+      tc.apiVersion != null && `API ${tc.apiVersion}`,
+      tc.sdk
+    ].filter(Boolean).join(" · ");
+    lines.push(
+      `- ${tc.id} ${tc.available ? "OK" : "缺失(未安装)"}  ${tc.label}` +
+        `\n    root=${tc.root}` +
+        `\n    ${ver || "(没有 version.txt)"}` +
+        `\n    接受写法=${tc.versionFormat === "bare" ? '"x.y.z" 裸写法（如 "26.0.0"）' : '"x.y.z(N)"（如 "6.1.0(23)"）'}`
+    );
+  }
+  if (project) {
+    const det = await detectProjectApi(project);
+    if (!det.found) {
+      lines.push(`工程探测: 找不到 ${det.path}`);
+    } else {
+      const picked = await selectToolchain(project, "auto");
+      lines.push(
+        `工程探测: compileSdkVersion=${det.compileSdkVersion ?? "(缺)"} targetSdkVersion=${det.targetSdkVersion ?? "(缺)"}` +
+          ` → API ${det.apiVersion ?? "?"}` +
+          `\n  选用工具链: ${picked.toolchain.id}（${picked.reason}）` +
+          (det.needsNormalize
+            ? `\n  注意: 版本号写成了 "${det.raw}"（Studio 写法），hvigor 6.26.4 只认裸写法 "26.0.0"，dev_build 会先自动改写并备份 .bak-api26`
+            : "") +
+          (det.format === "bare-legacy"
+            ? `\n  注意: 裸写法 "${det.raw}" 只对 API >= 26 成立，老 hvigor 会报 00306042`
+            : "")
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
 function apply(ctx) {
   const tools = [];
 
   tools.push(defineTool({
+    name: "dev_toolchain",
+    description: "Inspect or switch a project's HarmonyOS toolchain. action=status (default) reports every installed toolchain (api23 / api26), the project's declared compileSdkVersion/targetSdkVersion and which toolchain dev_build would pick. action=use-api26 rewrites build-profile.json5 to the API 26 spelling hvigor 6.26.4 requires (bare \"26.0.0\") and points local.properties at the API 26 sdk/node, keeping a .bak-api26 backup (= the previous API 23 config). action=restore puts that backup back. This is a read-only status by default; the two switch actions write project files.",
+    parameters: {
+      project: {
+        type: "string",
+        description: "Path to the HarmonyOS project directory (containing build-profile.json5). Relative paths resolve against the session working directory."
+      },
+      action: {
+        type: "string",
+        description: "status | use-api26 | restore (default status)."
+      },
+      clean: {
+        type: "boolean",
+        description: "Also delete .hvigor/build caches when switching (recommended after a toolchain change; the switch actions default to true)."
+      }
+    },
+    output: {
+      schema: resultSchema,
+      render: renderResult
+    },
+    isConcurrencySafe: () => false,
+    presentCall: present("generic", "Inspect/switch DevEco toolchain", "write", "project"),
+    async execute(args, exec) {
+      const cwd = exec.agent?.session.header.cwd ?? process.cwd();
+      const action = args.action ?? "status";
+      const started = Date.now();
+      const project = args.project ? await ensureProjectDir(args.project, cwd) : null;
+      if (action === "status") {
+        const report = await describeToolchains(project);
+        return {
+          ok: true,
+          command: `dev_toolchain status${project ? ` (${project})` : ""}`,
+          exitCode: 0,
+          durationMs: Date.now() - started,
+          timedOut: false,
+          truncated: false,
+          output:
+            `${report}\n\n` +
+            "提示: DevEco Studio GUI 走的是它自己内置的 SDK/工具链，本机 Studio 6.1.5.408 只带 API 23，" +
+            "所以 API 26 工程在 GUI 里同步/构建必然报 00303168 / 00306042 —— API 26 的编译能力只能走这里（dev_build）或 ~/bin/hm-build.sh。"
+        };
+      }
+      if (!project) {
+        throw new Error("use-api26 / restore 需要 project 参数");
+      }
+      if (action === "use-api26") {
+        const r = await normalizeProjectToApi26(project, { clean: args.clean ?? true });
+        return {
+          ok: true,
+          command: `dev_toolchain use-api26 (${project})`,
+          exitCode: 0,
+          durationMs: Date.now() - started,
+          timedOut: false,
+          truncated: false,
+          output: [
+            `已把 ${project} 切到 API 26 工具链配置`,
+            `compileSdkVersion/targetSdkVersion → "${r.version}"${r.changed ? "" : "（本来就是这个写法）"}`,
+            `local.properties → API26 sdk/node${r.localPropertiesChanged ? "" : "（本来就是）"}`,
+            ...r.backups,
+            "下一步: dev_build project=<工程> （会自动选 api26 工具链）"
+          ].join("\n")
+        };
+      }
+      if (action === "restore") {
+        const r = await restoreProjectToApi23(project, { clean: args.clean ?? true });
+        return {
+          ok: true,
+          command: `dev_toolchain restore (${project})`,
+          exitCode: 0,
+          durationMs: Date.now() - started,
+          timedOut: false,
+          truncated: false,
+          output: [
+            `已还原 ${project} 的切换前配置`,
+            ...r.notes,
+            "注意: 若工程代码本身用了 API 26 能力（如 @kit.ArkUI 的 uiMaterial/systemMaterial），还原后命令行构建会失败，需要重新 dev_toolchain action=use-api26。"
+          ].join("\n")
+        };
+      }
+      throw new Error(`未知 action: ${action}（可用: status | use-api26 | restore）`);
+    }
+  }));
+
+  tools.push(defineTool({
     name: "dev_environment",
-    description: "Probe the local DevEco toolchain: node / hvigor / ohpm / hdc versions and the HarmonyOS SDK. Run this first to learn what is installed before planning a build or deploy.",
-    parameters: {},
+    description: "Probe the local DevEco toolchains: node / hvigor / ohpm / hdc versions and the installed SDKs. This machine has two mutually exclusive toolchains — api23 (~/deveco/deveco_tools, hvigor 6.23.15, HarmonyOS 6.1.0(23), accepts only 'x.y.z(N)') and api26 (~/deveco/suite/tools-api26, hvigor 6.26.4, HarmonyOS 26.0.0, accepts only bare 'x.y.z'); whatever a project declares in build-profile.json5 decides which one it must use. Run this first, and pass project to also see which toolchain that project resolves to.",
+    parameters: {
+      project: {
+        type: "string",
+        description: "Optional HarmonyOS project directory to inspect: reports its compileSdkVersion/targetSdkVersion and the toolchain dev_build would pick for it."
+      }
+    },
     output: {
       schema: resultSchema,
       render: renderResult
     },
     isConcurrencySafe: () => true,
     presentCall: present("generic", "Probe DevEco environment", "read"),
-    async execute(_args, exec) {
+    async execute(args, exec) {
       const cwd = exec.agent?.session.header.cwd ?? process.cwd();
+      const project = args.project ? await ensureProjectDir(args.project, cwd) : null;
+      const report = await describeToolchains(project);
+      const chosen = project
+        ? (await selectToolchain(project, "auto")).toolchain
+        : resolveToolchain();
       const probes = [
-        { file: NODE_BIN, args: ["--version"], cmd: "node --version" },
-        { file: NODE_BIN, args: [HVIGOR_JS, "--version"], cmd: "node hvigorw.js --version" },
-        { file: TOOLS.ohpmBin, args: ["--version"], cmd: "ohpm --version" },
+        { file: chosen.nodeBin, args: ["--version"], cmd: `node --version (${chosen.id})` },
+        { file: chosen.nodeBin, args: [chosen.hvigorJs, "--version"], cmd: `node hvigorw.js --version (${chosen.id})` },
+        { file: chosen.ohpmBin, args: ["--version"], cmd: `ohpm --version (${chosen.id})` },
         { file: TOOLS.hdcBin, args: ["list", "targets"], cmd: "hdc list targets" }
       ];
       const steps = [];
       for (const p of probes) {
-        const r = await runCommand(p.file, p.args, { cwd });
+        const r = await runCommand(p.file, p.args, { cwd, toolchain: chosen });
         steps.push({ ...r, command: p.cmd });
       }
-      return assemble("dev_environment", steps);
+      const result = assemble("dev_environment", steps);
+      return { ...result, output: `${report}\n\n${result.output}` };
     }
   }));
 
@@ -144,14 +285,15 @@ function apply(ctx) {
     async execute(args, exec) {
       const cwd = exec.agent?.session.header.cwd ?? process.cwd();
       const project = await ensureProjectDir(args.project, cwd);
-      const r = await runCommand(TOOLS.ohpmBin, ["install"], { cwd: project });
-      return { ...r, ok: r.exitCode === 0, command: `ohpm install (in ${project})` };
+      const tc = (await selectToolchain(project, "auto")).toolchain;
+      const r = await runCommand(tc.ohpmBin, ["install"], { cwd: project, toolchain: tc });
+      return { ...r, ok: r.exitCode === 0, command: `ohpm install (in ${project}, ${tc.id})` };
     }
   }));
 
   tools.push(defineTool({
     name: "dev_build",
-    description: "Build a HarmonyOS project with hvigor. Defaults to assembling the HAP (assembleHap). Use clean to force a full rebuild, mode=release for a signed release package, and installDeps to run `ohpm install` first. Reports the last 200 lines of the build log.",
+    description: "Build a HarmonyOS project with hvigor. Defaults to assembling the HAP (assembleHap). The toolchain is auto-detected from build-profile.json5: a project with compileSdkVersion/targetSdkVersion API >= 26 is built with the API 26 toolchain (hvigor 6.26.4), anything else with the API 23 one — the two are mutually exclusive, so a mismatch fails with 00306042/00303313/00303168. API 26 projects additionally need the bare version spelling, so dev_build rewrites compile/targetSdkVersion to \"26.0.0\" first (backup: build-profile.json5.bak-api26; skip with keepConfig). Use clean to force a full rebuild, mode=release for a signed release package, and installDeps to run `ohpm install` first. Reports the last 200 lines of the build log.",
     parameters: {
       project: {
         type: "string",
@@ -164,6 +306,26 @@ function apply(ctx) {
       mode: {
         type: "string",
         description: "Build mode: debug or release (maps to -p buildMode). Omit for hvigor default."
+      },
+      apiVersion: {
+        type: "string",
+        description: "Toolchain to use: auto (default, from build-profile.json5), 23 / api23, or 26 / api26. Only override to force a specific toolchain."
+      },
+      keepConfig: {
+        type: "boolean",
+        description: "API 26 only: do not rewrite build-profile.json5 to the bare \"26.0.0\" spelling. Set this when the file is already hand-tuned; the build then fails if the spelling is the Studio one."
+      },
+      deviceType: {
+        type: "string",
+        description: "API 26 only: requiredDeviceType passed to hvigor (default: the project's preferred deviceTypes entry, else 2in1)."
+      },
+      module: {
+        type: "string",
+        description: "API 26 only: module@target to build (default: first module/target of build-profile.json5, e.g. entry@default)."
+      },
+      product: {
+        type: "string",
+        description: "API 26 only: -p product (default: first product of build-profile.json5, usually default)."
       },
       clean: {
         type: "boolean",
@@ -184,22 +346,52 @@ function apply(ctx) {
       const cwd = exec.agent?.session.header.cwd ?? process.cwd();
       const project = await ensureProjectDir(args.project, cwd);
       const task = args.task ?? "assembleHap";
+      const selected = await selectToolchain(project, args.apiVersion ?? "auto");
+      const tc = selected.toolchain;
+      const notes = [
+        `工具链: ${tc.id} — ${selected.reason}`,
+        ...(selected.fallbackFrom ? [`注意: 请求的 ${selected.fallbackFrom} 未安装，已回退到 ${tc.id}`] : []),
+        ...(selected.detection?.needsNormalize && args.keepConfig
+          ? [`注意: build-profile.json5 用的是 "${selected.detection.raw}"（Studio 写法），hvigor 6.26.4 只认 "26.0.0"；本次按 keepConfig 未改写`]
+          : [])
+      ];
       const steps = [];
       if (args.installDeps) {
-        const inst = await runCommand(TOOLS.ohpmBin, ["install"], { cwd: project });
+        const inst = await runCommand(tc.ohpmBin, ["install"], { cwd: project, toolchain: tc });
         steps.push({ ...inst, command: `ohpm install (in ${project})` });
       }
-      const hvigorArgs = [
-        ...(args.clean ? ["clean"] : []),
-        task,
-        ...(args.mode ? ["-p", `buildMode=${args.mode}`] : [])
-      ];
-      const build = await runCommand(NODE_BIN, [HVIGOR_JS, ...hvigorArgs], { cwd: project });
+
+      const hvigorArgs = [...(args.clean ? ["clean"] : []), task];
+      if (tc.id === "api26") {
+        const defaults = await detectBuildDefaults(project);
+        if (selected.detection?.needsNormalize && !args.keepConfig) {
+          const normalized = await normalizeProjectToApi26(project, { clean: Boolean(args.clean) });
+          notes.push(
+            `已把 build-profile.json5 切成 API 26 写法 "${normalized.version}"` +
+              `${normalized.changed ? "" : "（本来就是这个写法）"}` +
+              `${normalized.backups.length ? `；${normalized.backups.join("；")}` : ""}`
+          );
+        }
+        hvigorArgs.push(
+          "--mode", "module",
+          "-p", `module=${args.module ?? `${defaults.module}@${defaults.target}`}`,
+          "-p", `requiredDeviceType=${args.deviceType ?? defaults.deviceType}`,
+          "-p", `product=${args.product ?? defaults.product}`
+        );
+      }
+      if (args.mode) hvigorArgs.push("-p", `buildMode=${args.mode}`);
+
+      const build = await runCommand(tc.nodeBin, [tc.hvigorJs, ...hvigorArgs], {
+        cwd: project,
+        toolchain: tc,
+        timeoutMs: 1_200_000
+      });
       steps.push({
         ...build,
-        command: `node hvigorw.js ${hvigorArgs.join(" ")} (in ${project})`
+        command: `node hvigorw.js ${hvigorArgs.join(" ")} (in ${project}, ${tc.id})`
       });
-      return assemble("dev_build", steps);
+      const result = assemble("dev_build", steps);
+      return { ...result, output: `${notes.join("\n")}\n\n${result.output}` };
     }
   }));
 
@@ -417,11 +609,16 @@ function apply(ctx) {
 
       // hvigor mode: project-local @ohos/hypium unit tests.
       const task = args.task ?? "test";
-      const build = await runCommand(NODE_BIN, [HVIGOR_JS, task], { cwd: project, timeoutMs: 1_200_000 });
+      const tc = (await selectToolchain(project, "auto")).toolchain;
+      const build = await runCommand(tc.nodeBin, [tc.hvigorJs, task], {
+        cwd: project,
+        toolchain: tc,
+        timeoutMs: 1_200_000
+      });
       return {
         ...build,
         ok: build.exitCode === 0,
-        command: `node hvigorw.js ${task} (in ${project})`
+        command: `node hvigorw.js ${task} (in ${project}, ${tc.id})`
       };
     }
   }));

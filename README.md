@@ -8,7 +8,7 @@
   <img alt="HarmonyOS" src="https://img.shields.io/badge/HarmonyOS-Adapt-blue">
   <img alt="DeepSeek Harness" src="https://img.shields.io/badge/DeepSeek_Harness-dsh-41b0ff">
   <img alt="Cache Hit" src="https://img.shields.io/badge/Cache_Hit-98%25-orange">
-  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22%2B-black">
+  <img alt="Node.js 22 / 24" src="https://img.shields.io/badge/Node.js-22%E2%80%9324-black">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
 </p>
 
@@ -419,6 +419,32 @@ node hvigorw.js assembleHap
 
 **预构建产物**：未签名 release HAP 挂在 GitHub Releases（[`v1.0.0-pc`](https://github.com/QinpanWan/dsh-harmonyos-pc/releases/tag/v1.0.0-pc)，即上面那份 `client/dist/` 产物）——**自取 + 自行签名侧载**，包内没有 `META-INF/`，不签装不上。
 
+### 本地装机：未签名 HAP → 真机
+
+未签名 HAP（包内无 `META-INF/`）直接 `hdc install` 会报 **`error: no signature file`**，必须先签名。两种情况：
+
+- **有 DevEco Studio 且已登录华为账号**：打开 `client/` → `File > Project Structure > Signing Configs` 勾「自动签名」→
+  `Run`（或 `Build > Build Hap(s)` 出签名包）→ `hdc install <signed.hap>`。最省事，推荐。
+- **命令行签名（本机实测过的路径）**：SDK 自带 `hap-sign-tool.jar`
+  （`$DEVECO_SDK_HOME/default/openharmony/toolchains/lib/hap-sign-tool.jar`）+ 一份**调试证书**（`.p12` 私钥 + `.cer` 证书 +
+  `.p7b` profile，profile 里的 `debug-info.device-ids` 必须包含目标设备的 UDID，`hdc shell bm get --udid` 可查）：
+
+  ```bash
+  java -jar "$SDK/default/openharmony/toolchains/lib/hap-sign-tool.jar" sign-app \
+    -mode localSign -keyAlias <别名> -signAlg SHA256withECDSA \
+    -appCertFile <证书.cer> -profileFile <profile.p7b> -keystoreFile <私钥.p12> \
+    -keyPwd <口令> -keystorePwd <口令> \
+    -inFile entry-default-unsigned.hap -outFile entry-default-signed.hap
+  hdc install -r entry-default-signed.hap
+  ```
+
+  证书/profile 从哪来：DevEco 自动签名生成后会落到 `~/.ohos/config/`（`*.p12` + `*.p7b`）；本机另有一份历史遗留的
+  调试证书（`~/Download/com.xiaobai.hap_installer/hap_installer/store/`，profile 即 `com_dsh_harmonyos_client.p7b`）。
+  **别人的证书装不上你的设备**（UDID 白名单 + 证书链），请用自己的。
+
+> **本机就是鸿蒙 PC 时可用的捷径**：`hdc list targets` 会直接列出 `127.0.0.1:32905`，`hdc shell "aa start -b com.dsh.harmonyos.client -a EntryAbility"`
+> 直接拉起窗口、`hdc shell "snapshot_display -f /data/local/tmp/s.jpeg"` + `hdc file recv` 直接截图——不需要第二台机器。
+
 ---
 
 ## 工具链
@@ -431,8 +457,22 @@ node hvigorw.js assembleHap
 | `scripts/dsh-update-web.sh` | 设置与更新页（3098，内嵌 HTML） |
 | `scripts/dsh-hm-install.mjs` | GitHub 源插件一键安装（绕过 isogit 拦截） |
 | `scripts/dsh-hm-update.sh` | **一键更新**（官方 dsh 升级 + 仓库预设/插件/补丁同步，`check` / 默认 update） |
+| `scripts/node-runtime.sh` | 公共运行时解析（各启动脚本 source 用）：探测本机所有 node，挑「版本最高、且真能跑起来」的那个 |
+| `scripts/dsh-runtime-check.mjs` | 运行时选择回归（22 项，用假 node 把每条分支跑出来） |
 
-所有脚本支持 `NODE_BIN` 环境变量覆盖 node 路径（鸿蒙默认 `/data/service/hnp/node.org/node_v24.13.0/bin/node`）。
+**node 版本：不锁。能跑最新的就用最新的。** 官方 dsh 基线要 node ≥ 22.18（本仓的 `compat-loader` 把它兜到鸿蒙自带的 v22.7），
+而鸿蒙上自带的 hnp node 是 **v24.13**（最新线）——但同一个 v24 二进制在部分鸿蒙设备/受限通道上会在 V8 初始化阶段**偶发**原生崩
+（code-range 预留 mmap 失败 → `Fatal error in , line 0` / `Check failed: 12 == (*__errno_location())`，没有官方开关可关），
+deveco 自带的 v22.7 反而稳定。所以脚本不再写死路径，而是：
+
+1. 把本机能找到的 node 全列出来（`/data/service/hnp/node.org/node_*/bin/node`、`~/deveco/deveco_tools/node/bin/node`、`PATH` 里的、常见目录）；
+2. 按**版本从高到低**各跑一次 `-e 'process.exit(0)'` 冒烟（崩是偶发的，给 3 次机会）；
+3. 第一个真能起来的就用 —— **Node 24 能用就用 24，起不来自动退 22**，两种机器都不用改命令；
+4. 开关（`--expose-internals` / `--experimental-sqlite` / `compat-loader`）按**运行时能力探测**，绝不塞它不认的参数（v24 原生有 `node:sqlite`、原生 zstd，就不再加垫片参数）。
+
+- 只看会选哪个、带什么开关：`sh scripts/dsh-web.sh --print-node`（`dsh-update.sh` / `dsh-hm-update.sh` / `dsh-update-web.sh` 同样支持，只探测、不启动、不动在跑的服务）
+- 显式指定：`NODE_BIN=/path/to/node`（可选 `DSH_NODE_BIN`；最先试，起不来仍会自动兜底）或 `DSH_NODE_CANDIDATES=a:b`（只试这些）
+- 回归：`node scripts/dsh-runtime-check.mjs`
 
 ---
 
@@ -480,6 +520,19 @@ MIT License，见 [LICENSE](LICENSE)。
 
 ## 更新记录
 
+### 2026-09-26 — 运行时不再锁 node 22：能跑 Node 24 就用 24，起不来才退 22（四个启动脚本统一）
+
+- **问题**：方案此前把 node 路径写死（`dsh-update.sh` / `dsh-hm-update.sh` / `dsh-update-web.sh` / `dsh-hm-update.mjs` 钉的是 hnp `node_v24.13.0`，
+  `dsh-web.sh` 钉的是 deveco v22.7）——机器上正好是「这个版本起不来」时就把用户按在旧版本上，README 徽章也还写着 `Node.js 22+`。
+- **做法**：新增 `scripts/node-runtime.sh` 公共段（把 `dsh-web.sh` 里的探测逻辑抽出来共用）：列候选 → 按版本从高到低做 `-e 'process.exit(0)'` 冒烟（崩是偶发的，给 3 次机会）
+  → 第一个真能起来的即选定；开关（`--expose-internals` / `--experimental-sqlite` / `compat-loader`）按运行时能力探测，不塞它不认的参数。
+  四个启动脚本全部改走公共段，`--print-node` 都能先看会选哪个、带什么开关（只探测、不启动）。
+- **顺手**：`dsh-hm-update.mjs` 的子进程 node 改为 `process.execPath`（跟随当前正在跑的 node，不再写死 hnp 路径）；`dsh-hm-install.mjs` 找 npm/工具时先看当前 node 的 `bin/` 目录。
+- **回归**：`node scripts/dsh-runtime-check.mjs` **12 → 22 项**（新增「四个脚本都不写死路径」「三个更新脚本 `--print-node` 也挑最高可跑版本」「mjs 跟随 `process.execPath`」等）；
+  `desktop-shell-check.mjs` 33/33、`direct-mode-check.mjs` 47/47、`session-live-check.mjs` 58/58、`gen-harmony-ui-assets.mjs --check` 5/5。
+- **本机实测**：鸿蒙自带 hnp `node_v24.13.0` 在 V8 初始化阶段原生崩（`Check failed: 12 == (*__errno_location())`；`--jitless` 能跑但等于关 JIT + 没有 WASM），
+  探测自动选中 deveco v22.7 + `--experimental-sqlite` + compat-loader —— 也就是「24 能用就用 24」这条路上，本机只是那个 24 恰好不能用，命令一个都不用改。
+
 ### 2026-09-26 — 鸿蒙桌面端 HAP 上线 Releases：`v1.0.0-pc` 自取，自行侧载
 
 桌面端不再只躺在本地 `client/dist/`。本次把「扒官方 Electron 壳 → 原生 ArkTS 桌面壳」这一整轮适配的源码并入 `main`
@@ -494,6 +547,186 @@ MIT License，见 [LICENSE](LICENSE)。
   - 已有自己的调试证书：`hapsigntool` 签完再 `hdc install <hap>`
 - **开箱即用**：默认**独立模式**，8 套对话模式与系统提示随包内置（`resources/rawfile/presets.json`），只填 DeepSeek API Key，**不需要本机 dsh 服务**；要连本机/局域网实例再切设置里的「dsh 服务模式」
 - **仍未真机验证**：出包时 `hdc list targets` 为空，真机 UI/交互未跑通；四条已知限制（更新只提示不安装、编辑菜单不注入按键、无托盘、`restartAppHost` 提示到终端）见上文《限制》
+
+### 2026-09-26（第七轮）— 独立模式「发消息不在左侧生成会话」真因：切模式带过来的悬挂会话 id
+
+主人报「发送消息之后不生成新会话在左侧 —— 这个问题是独立模式下的」。真机复现（本机即那台鸿蒙 PC，`hdc list targets` = `127.0.0.1:32905`）：
+**先在 dsh 服务模式里点过「新会话」/选过一条空会话，再切回独立模式发消息** —— 正文、思维链、回答都正常流式出来，只有左侧栏一直挂着「还没有会话」。
+
+- **根因：`Index.sendDirect()` 用「`currentSessionId` 是否为空」判断要不要就地建本机会话**。从 dsh 服务模式切回来时
+  `currentSessionId` 还停在服务端会话 id 上（**非空**，但 `directConversations` 里没有这一行），于是 `beginDirectConversation()` 被跳过，
+  侧栏那份投影（`publishDirectSessions()`）一条行都出不来。判据应该问「这条 id 在不在本机会话清单里」：
+  `if (this.findDirectConversation(this.currentSessionId) === null) { this.beginDirectConversation(text); }`。
+- **同一族第二处**：`adoptDirectConversation()`（进独立模式时把当前正文收进清单）原先在 `messages.length === 0` 时直接 `return`，
+  把悬挂 id 原样留在原地 —— 一样会漏建。改成先清掉不属于本机会话的 id（正文也空时连标题一起复位成「新会话」）。
+- **顺带补上模式隔离（第三处）**：切模式的瞬间上一模式的服务端流还开着，回来照样往状态里写 —— `session/list` 全量回包会把侧栏换成
+  服务端那几百条会话、当前会话的 `follow` 快照会把独立模式正文整段覆盖、宿主 `$events` 的 `api-session/added` 会往侧栏插服务端行。
+  `refreshSessions()` 的 then 回包 / `onFollowValue()` / `onHostEvent()` 各加一句 `if (this.mode !== 'dsh')`（dsh 模式行为不变）。
+
+**真机实测（18:12–18:18，以 `uitest dumpLayout` 为准）**：
+
+- **复现（修复前）**：dsh 服务模式点一条空会话（`currentSessionId` 非空、正文空）→ 切回独立模式 → 发「测试乙」→ 回答正常、侧栏仍「还没有会话」。
+- **修好后同一路径**：切回独立模式时标题栏即复位成「新会话」；发「回归乙」→ 侧栏顶部当场出现「回归乙 18:16」，下面留着上一轮「回归甲 18:15」。
+- **回归**：冷启动独立模式发「回归甲」→ 侧栏照常出行（旧行为没被破坏）。
+- **模式隔离**：独立模式下命令行造 dsh 活动（另一路 `$events` 探针同期收到 `api-session/added`）→ 应用侧栏纹丝不动；切回 dsh 服务模式再造一次 → 两行「新会话 18:17」照旧实时冒出来。
+- **回归检查**：`direct-mode-check.mjs` **41 → 47 项**（新增悬挂 id 判据 / 悬挂 id 清理 / 三处模式守卫）；`session-live-check.mjs` 58/58、`desktop-shell-check.mjs` 33/33、`gen-harmony-ui-assets.mjs --check` 5/5（181 令牌 · 94 字形）。
+- **产物**：release 未签名 HAP **769,014 B**（`ets/modules.abc` **713,988 B**），sha256 `af4a1f45b6c8f4bd35e39fbc9dad59bcfabb2d4fc511ca46c9610caef8fba3bd`，`client/dist/` 与 `~/Download/` 各一份；装机仍走 `sh ~/bin/hm-sign-install.sh <unsigned.hap>` + `hdc install -r`。
+- **验证副作用**：为跑「外部活动」用例在 `/storage/Users/currentUser/_AgentScratch` 工作区建过 3 条空会话（`session-33cec94a…` / `session-6115aa17…` / `session-fc525708…`，其中一条曾被改名成「守卫测试-重命名」），归档集合已用 `workspace/unarchiveSession` 原样还原。
+
+### 2026-09-26（第六轮）— 侧栏实时化真机跑通：`$events` 握手缺一个 `supportOriginPort`（403），侧栏行键不重绘
+
+第四轮做的「左侧实时冒出最新会话」在真机上**一次都没生效**。既然上一轮（第五轮）已经确认**本机就是那台鸿蒙 PC**
+（`hdc list targets` = `127.0.0.1:32905`），这一轮就直接对着本机的 dsh 服务（`127.0.0.1:3080`）在设备上排，抓到两个只在真机现形的 bug：
+
+- **① WebSocket 握手的 `Origin` 少一个端口 → 被 dsh 的 Host/Origin 栅栏 403，`$events` 压根没连上**。ArkTS
+  `@ohos.web.webSocket` 建连时的 `Origin` 默认取 `address`（只有 host、无端口），而 dsh 网关按「Origin 的 authority 必须与 Host
+  完全一致（含端口）」校验：`Origin: http://127.0.0.1` vs `Host: 127.0.0.1:3080` 判不等 → **403**，事件流当场断在门口。
+  第四轮那套 `api-session/added` / `removed` / `status` / `activity` 分支因此**从未被喂过数据**，侧栏只剩「等下一次全量
+  `session/list`」这一条路 —— 正是主人说的「左侧没实时刷新出最新会话」。修法（`service/DshApiClient.ets` 的 `openHostEvents()`）：
+  `const options: webSocket.WebSocketRequestOptions = { header: header, supportOriginPort: true }`
+  （API 26 起可用的开关，打开后 `Origin` 才带 `host:port`）。定位靠三个临时探针：
+  `mux-events-probe.mjs` / `mux-origin-probe.mjs` / `ws-probe-server.mjs` —— 先用本地假网关回显握手头，看出 `Origin` 里没有端口，
+  再对真 dsh 复现 403。
+- **② 侧栏行「内容变了、键没变」→ ArkUI 复用旧行不重绘**。`view/Sidebar.ets` 的 `ForEach` 行键原先只有 `sessionId`。
+  第五轮在正文气泡上刚踩过同一个坑（`ForEach` 只按 key 判等），侧栏是同一个病的第二个病例：新会话**能**插进来（数组变了、
+  键也是新的），但「标题刚从 `session/title` 来」「运行圆点刚亮起来」「时间刚前移」「选中态刚换」这四种情况**键没变**，
+  ArkUI 就直接复用旧行 —— 现象是「列表有条目，但标题/时间/圆点不跟着动」。修法：把
+  `sessionId | title | updatedAt | running | 是否当前选中` 全编进行键（一次事件只重建一行，量很小）。
+
+**真机实测（17:49–17:52，以截图与 `uitest dumpLayout` 为准）**：
+
+- **别处新建的会话秒出现**：命令行 `POST /api/session/create`（cwd = `BrewDiary-New`）→ 约 2 秒内侧栏顶部冒出该行，全程没碰应用。
+- **标题/时间实时刷新**：对刚建的会话 `POST /api/session/prompt` → 该行标题变「从1数到3」、时间变 17:50 并置顶，顶部页签名同步。
+- **思维链实时滚动 + 自动跟到底**：同一轮正在跑时，「思考」披露行跟着流式增长，正文自动跟随到底部。
+- **「回到底部」浮标**：`uitest uiInput fling` 把正文上翻 → 右下角出现 34 圆浮标（px `[2451,1575][2516,1640]`）；
+  点它回到底部、浮标消失。
+- **应用自己发消息**：`uitest uiInput inputText` 往输入卡打字 + 点发送 → 用户气泡 + 思考行 + 助手回答
+  （17:52「收到，主人～有事随时吩咐，我在。」），侧栏时间同步到 17:52。
+
+- **回归检查**：`session-live-check.mjs` **50 → 58 项**（新增「握手必须带 `supportOriginPort`」「独立模式本机会话清单」
+  「独立模式发首条就地建会话」「「新会话」把当前这轮收进清单再开空的」「侧栏行键编入标题/时间/运行位/选中态」等）；
+  `desktop-shell-check.mjs` **33/33**、`direct-mode-check.mjs` **32 → 41 项**、`gen-harmony-ui-assets.mjs --check` 5/5（181 令牌 · 94 字形）。
+- **产物**：release 未签名 HAP **768,766 B**（`ets/modules.abc` **713,740 B**；包内可查到 `supportOriginPort` / `$events` /
+  `api-session/added` / `blocksToReasoning` / `回到底部`），sha256
+  `dca83051433c63319f12ac783988bfc872affae6368cd2366849f3f0f57db9fd`（`client/dist/` 与 `~/Download/` 各一份，
+  与 `entry/build/.../entry-default-unsigned.hap` 逐字节一致）。
+- **装机路径（本机即设备）**：`sh ~/bin/hm-sign-install.sh <unsigned.hap>`（用
+  `~/Download/com.xiaobai.hap_installer/hap_installer/store/` 的 `xiaobai.p12` + `xiaobai-debug.cer` +
+  `com_dsh_harmonyos_client.p7b` 本地签名）→ `hdc install -r` →
+  `hdc shell "aa start -b com.dsh.harmonyos.client -a EntryAbility"` → `hdc shell snapshot_display -f …` 直接截图。
+- **仍未验证**：独立模式（直连 `api.deepseek.com`）下的这套实时链路 —— 本轮实测的是 **dsh 服务模式**。
+
+### 2026-09-26（第五轮）— 真机首测（本机就是鸿蒙 PC）：流式正文不刷 + 独立模式思维链整条丢失
+
+主人说「还是没反应，这个思维链滚动不出来」，并提示**这就是装在本机的设备**（`hdc list targets` = `127.0.0.1:32905`，本机
+就是那台 HarmonyOS PC，`aa start` 直接就能拉起客户端、`snapshot_display` 直接就能截图）。于是这一轮第一次把上一轮的改动
+**真的装到设备上跑起来**，又抓到两个只在真机上暴露的 bug：
+
+- **① 流式正文一个增量都不重绘（主人说的「发了没反应」的真身）**：`view/MessageItem.ets` 正文 `ForEach` 的键原先只有
+  `消息id-下标` —— **ArkUI 的 `ForEach` 只按 key 判等，key 不变就把该 item 当成同一个不重绘**。助手气泡是「先建一条空消息、
+  再不停往 `text` 里追加」的模型，键不变 ⇒ 气泡永远停在**空**的状态（`reasoning` 有内容时还能靠上面那行「思考中」看出来活着，
+  所以现象更像「卡住」）。修法：把内容也编进键 ——
+  `blockKey()` = `消息id-下标-t|-c-文本长度`（`isCode` 与文本长度都进键），每个增量换一次键，正文才会跟着刷。
+- **② 独立模式（内置直连）整条思维链丢掉**：独立模式走的是官方 `/chat/completions` 的**流式 SSE**，推理模型
+  （`deepseek-v4-flash` / `*-reasoner` 系）把思维链放在 `choices[0].delta.reasoning_content` 里，而独立模式的解析器只认
+  `delta.content` ⇒ 界面在整个思考阶段**只有一行「思考中」**、一个字都不涨，看起来就是「思维链滚动不出来」（这正是主人第一句
+  话的观感）。修法（`service/DshApiClient.ets`）：把「取一帧里某个字段」抽成 `frameField(frame, field)`，
+  在其上给出 `frameText` / `frameReasoning`（= `delta.content` / `delta.reasoning_content`）、`streamText` / `streamReasoning`、
+  `completionText` / `completionReasoning`；`Index.ets` 的直连回合把 reasoning 增量写进助手消息的 `reasoning`，
+  于是上一轮新做的「思维链披露行」在独立模式下也有内容可显示、可实时滚动。
+- **③ 应用日志改为公共域，真机上抓得到**：`EntryAbility.ets` 的 `DOMAIN` 从 `0x0000` 改成 **`0xD0042`** ——
+  `0x00000–0x0FFFF` 是系统私有域，普通 `hdc shell hilog` 读不到；改到公共域后，真机排障直接
+  `hdc shell hilog -T DshDirect`（独立模式的首块/完成字数与耗时/失败原因）就能看到。这一轮前半段正是吃了这个亏
+  （抓了 12743 行 hilog，一条应用日志都没有）。
+- **真机实测（02:43，截图为准）**：装上带诊断探针的包、独立模式自动跑一条「说一句你好」，界面同时出现
+  ①用户气泡 ②**思维链行**（图标 + 「思考」+ 一行摘要，摘要跟着模型思考的尾巴走）③助手回答「你好！有什么需要帮忙的？」——
+  两个 bug 一起消失。随后**去掉探针重打干净包并重新签名装机**（02:44），装上后应用正常启动（进程在、窗口在）。
+- **回归检查**：`direct-mode-check.mjs` 从 32 项扩到 **41 项** —— 新抠出 `frameField / frameReasoning / streamReasoning /
+  completionField / completionReasoning` 一起跑，并加了 6 条思维链用例（逐帧取 CoT、CoT 帧不污染正文、整条流含残帧、
+  非推理模型为空、keep-alive 不影响、非 SSE 整段 JSON 的 CoT 兜底）。另三项：`desktop-shell-check.mjs` **33/33**、
+  `session-live-check.mjs` **50/50**、`gen-harmony-ui-assets.mjs --check` 5/5（181 令牌 · 94 字形）。
+- **产物**：release 未签名 HAP **763,994 B**（`ets/modules.abc` **708,968 B**；包内可查到 `reasoning_content` /
+  `frameReasoning` / `blocksToReasoning` / `思考中` / `回到底部` / `api-session/added`），sha256
+  `a3369d3371673b769b19cf4e94d4a55cb6272f4500983f2a855a6134b8a00908`，已覆盖 `client/dist/` 与 `~/Download/` 的同名副本；
+  真机上装的就是这一份（用本机调试证书 `hap-sign-tool` 签名后 `hdc install`，见下文《本地装机：未签名 HAP → 真机》）。
+- **仍未真机验证的部分**：这轮只验了独立模式（+ 截图）；`dsh` 服务模式的侧栏实时化 / 跟随滚动虽然逻辑同一套，
+  但没在真机上做「别处新建会话是否秒出现」的对照，留待下一轮。
+
+### 2026-09-26（第四轮）— 侧栏「实时冒出最新会话」+ 思维链实时显示与跟随滚动
+
+主人报「桌面端还是有问题：没有实时显示和滚动思维链，左侧没实时刷新出最新会话」。两处都是真 bug，一个根因一条：
+
+- **侧栏：接上宿主的实时事件流 `$events`**（会话列表的真源）。宿主 `dsh-api-session-controller` 把
+  `session/created|session/disposed|agent/status|session/event` 映成 `ctx.emit('api-session/added'|'removed'|'status'|'activity')`，
+  `dsh-api-remotes` 的 `API_REMOTE_FORWARDED_EVENTS` 白名单再把它们经网关内建逻辑流转发给客户端（官方 web 端
+  `ctx.remote.$on` 走的同一条路）；下行帧是 `{"type":"item","streamId":…,"value":{"type":"ready",…}}`（事件源就绪）与
+  `{"type":"emit","event":"api-session/added","args":[summary]}`（业务）。新代码 `DshApiClient.openHostEvents()` 开一条
+  `$events`（payload 必须是**空** `args: {}`，网关侧会校验），`Index.onHostEvent()` 按事件就地改列表：
+  `added` → `upsertSession()`（新会话、别处建的会话**立即**插到最前）、`removed` → `removeSession()`、
+  `status` → `markSessionRunning()`（侧栏那一行的运行小圆点）、`activity` → `touchSession()`（把该行按 `updatedAt` 提到最前）。
+  旧代码只在 `turn/end` / `session/title` 时刷新列表，**别处新建的会话要等下一次全量才出现** —— 就是主人看到的「左边没实时刷新」。
+- **绝不每条事件重拉全表**：`session/list` 实测 286 行 / ~188KB / ~1s。事件载荷与 `session/list` 的行同源，所以复用同一个
+  `parseSessionSummary()` 就地更新；只有**本地查不到这一行**时才去抖兜底一次全量刷新（200/800ms），
+  外面再加 `sessionRefreshInFlight` 并发闸门（同一时刻只允许一次在飞；飞行中来的挂起，落地后 200ms 补一次）。
+- **思维链（CoT）两个来源都认**：① 实时 `assistant-stream` 帧（`block-start{blockType:'reasoning'|'text'}` /
+  `reasoning-delta{index,text}` / `text-delta` / `block-end` / `usage` / `finish` → `end{outcome.kind:'committed'}`，
+  实测一次回答约 200 帧）；② 落库的 `assistant/message` → `data.message.content[]` 里的 `{"type":"reasoning","text":…}`
+  （切会话 / 重连只拿得到快照，只有这一份）。旧代码 `blocksToText()` **只认 `text` 块** ⇒ 切会话后思维链直接丢；
+  `MessageItem` 又只在「有 reasoning 且没有 text」时显示「思考中」三个字，从不渲染 reasoning 内容。
+  现在新增 `blocksToReasoning()`，`assistant/message` 分支回填 `msg.reasoning`（并接管流式气泡），
+  `applyAssistantFrame` 支持多段 `block-start`（第 2 段起用 `\n\n` 接上；**单条 `block-start` 不会造出空气泡**）。
+- **思维链披露行**（`view/MessageItem.ets` 的 `reasoningRow()`，对齐上游 `ui-chat` 的 `ReasoningRow`）：
+  `IconThinkOutline` + 标题（生成中「思考中」/ 结束后「思考」）+ **一行实时摘要** + 展开/收起 chevron，
+  点标题展开完整思考。摘要的取舍与上游一致：生成中取**最后一行**（跟着模型思考的尾巴走，这就是「实时滚动」的观感），
+  结束取**首行**；去掉 `**` 记号并限长 160。上游的折叠与悬浮钉住这一轮**没有做**（有意简化，代码注释里写了）。
+- **跟随滚动 + 「回到底部」浮标**：`scrollToBottom(force)` 增加**跟随闸门** `followBottom` —— 读者主动上翻之后不再把人拽回底部；
+  发消息 / 切会话用 `force = true` 重新打开跟随。`ChatView` 在 `onDidScroll` 里用 **`Scroller.isAtEnd()`** 回报「是否停在底部」
+  （拿索引比较会被流式正文的高度增长误判成「读者上翻」），非底部时右下角出现 34 圆的「回到底部」浮标
+  （对齐上游同名 `.toBottom`，连 `aria-label` 都照搬成 `accessibilityText('回到底部')`）。
+- **回归检查**：新增 `scripts/session-live-check.mjs`（**50 项**）= 静态契约 + 把 `.ets` 里的**真函数**抠出来
+  在 `node --experimental-strip-types` 里跑 **刚在真 dsh 服务上抓下来的固件**（reasoning-delta / block-start 帧序列、
+  `assistant/message` 的 reasoning 块、`session/list` 摘要行、activity / status 事件）。
+  `desktop-shell-check.mjs` **33/33**、`direct-mode-check.mjs` **32/32**、`gen-harmony-ui-assets.mjs --check` 通过（181 令牌 · 94 字形）。
+- **产物**：release 未签名 HAP **761,969 B**（`ets/modules.abc` **706,944 B**；包内可查到 `$events` / `api-session/added` /
+  `blocksToReasoning` / `思考中` / `回到底部`），sha256 `4d8c1f41796269eaeee58bacea6c8cb3dd008c946d2cc1f7c9433e6f80de34d7`，
+  已覆盖 `client/dist/` 与 `~/Download/` 的同名副本。
+- **仍未真机验证**：出包时 `hdc list targets` 依旧为空，所以这一轮靠「上游源码对照 + 真服务固件回归」而不是设备截图。
+  装机后重点核三件事：别处新建的会话是否**秒**出现在左侧、思考行是否**实时滚动**、正文上翻后是否出现「回到底部」浮标。
+  （**2026-09-26 第五轮已补真机首测**：这一轮的两个 bug 已在设备上实测修好。**第六轮再补服务模式对照**：侧栏实时化原来是
+  `$events` 握手缺 `supportOriginPort` 而根本没连上 —— 修好后已在设备上测通「秒冒出 / 标题时间实时刷新」。）
+
+### 2026-09-26（第三轮）— 独立模式发消息不回复真因：`@ohos.net.http` 只有流式请求才派发 `dataReceive`/`dataEnd`
+
+主人报「桌面端开箱即用的模式发消息不回复，反正没看见智能体有反应，配好密钥也这样」。**不是密钥、不是模型名、
+不是网络**（拿本机真 key 直连官方 API 实测：`/v1/models` 200、`deepseek-v4-flash`/`deepseek-flash`/`deepseek-v4-pro`/
+`deepseek-chat`/`deepseek-reasoner` 全部 200），而是**请求发法选错了 API**：
+
+- **根因（源码实锤，不用猜）**：ArkTS 的 `@ohos.net.http` 只在**流式请求**下派发 `dataReceive` / `dataEnd`。
+  `communication_netstack` 里 `HttpExec::OnWritingMemoryBody` 与 `ProcessResponseBodyAndEmitEvents`
+  都以 `context->IsRequestInStream()` 为前提才 `SetTempData` + 投递 `OnDataReceive`，`ON_DATA_END`
+  更是只在 `AsyncWorkRequestInStreamCallback` 里发出（`http_exec.cpp`，`if (context->IsParseOK() && context->IsExecOK())` 分支）；
+  而 `EnableRequestInStream()` 只被 `http_module.cpp` 的 `requestInStream` 调用。
+  ⇒ 旧代码用 `req.request(...)` 发 SSE：**HTTP 200、`resp.result` 里躺着整段回答，但一个字节都到不了回调**，
+  而且非 200 才报错的判据也不成立 ⇒ 既不显示内容也不报错 = 主人看到的「发出去没反应」。
+- **修法**：`service/DshApiClient.ets` 的 `DeepSeekClient.chat()` 改用 `requestInStream`（promise 回响应码，
+  正文只走事件）；收尾统一成一个 `settle(err, flush)`（`finished` 闸门保证只生效一次）；**非 2xx 用自己攒的原文报错**
+  （流式模式没有 `resp.result`，错误详情只能自己记）；**HTTP 200 却一个数据块都没有 → 明确报「服务端没有返回任何内容」**
+  （把「静默假成功」变成能看见的失败）；用户点「停止」/ 开新回合走 `cancelHook` 按**正常结束**收尾（不再把主动中止
+  报成「请求失败」）；非 SSE 端点（忽略 `stream:true`、整段 JSON 返回）走 `completionText` 兜底；
+  读超时 300s → **600s**（netstack 把它当 curl `CURLOPT_TIMEOUT_MS` = 整条响应总时限，长思考容易顶到）；
+  另加 `DshDirect` 的 hilog（首块到达 / 完成字数与耗时 / 失败原因），下次真机再出问题不用再盲猜。
+- **顺带**：SSE 解析抽成静态方法（`frameBoundary` / `frameText` / `streamText` / `completionText`），
+  既能被收尾复用，也能被脚本直接喂真流固件；`data:` 不带空格也认，一帧多行 `data:` 按 SSE 规范拼接。
+- **防回归**：新增 `scripts/direct-mode-check.mjs`（**32 项**：静态契约 + 把 `.ets` 里**真的**解析函数抠出来
+  （`node --experimental-strip-types` 剥类型直接跑），喂**官方 API 抓下来的真实 SSE 固件**，按 1/2/3/4/5/7/13/64/999
+  字节任意切块（含多字节汉字被劈开）、keep-alive 心跳帧、`[DONE]`、无尾空行的残帧、非 SSE 整段 JSON 兜底）。
+  这个脚本当场抓到我这轮自己写的边界错（`lastIndexOf('\n\n')` 返回 -1 时 `-1 + 2 = 1 > 0`，
+  会把首字符当帧切出去 → 整条流全废）。`scripts/desktop-shell-check.mjs` 同步加 1 项守门 → **33/33**。
+- **出包**：release 未签名 HAP **744,701 B**（`ets/modules.abc` **689,676 B**，包内可查到 `requestInStream` /
+  `frameBoundary` / `DshDirect` 字符串），sha256 `03e5a3622b013d810870ab79012cc69c07033a52ca920a24e4aa6ee7c8528456`，
+  `client/dist/` 与 `~/Download/dsh-harmonyos-client-1.0.0-release-unsigned.hap` 各一份。
+- **仍未真机验证**：`hdc list targets` 依旧为空（无设备），修好的判定依据是「netstack 源码 + 真流固件回归」而不是真机截图；
+  主人装机后若还不动，请把 `hdc shell hilog -T DshDirect` 的内容贴回来，日志里会直接写首块/完成/失败。
 
 ### 2026-09-26（第二轮）— 左上角 logo「重影」真因：ArkUI 给每个 `Path` 描两遍边（缺省 `strokeWidth` = 1vp 黑）
 

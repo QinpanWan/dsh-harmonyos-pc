@@ -136,6 +136,8 @@ function toolBin(name) {
   } catch { /* fall through */ }
   const home = homedir();
   for (const c of [
+    // 跟着**当前正在跑的 node** 找（Node 24 也好、鸿蒙退到的 v22 也好，都不写死版本）
+    join(dirname(process.execPath), name),
     join(home, '.npm-global', 'bin', name),
     '/data/service/hnp/node.org/node_v24.13.0/bin/' + name,
     join(home, 'node-v22.14.0-linux-arm64', 'bin', name),

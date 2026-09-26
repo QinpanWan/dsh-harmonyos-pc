@@ -10,7 +10,8 @@
   },
   "files": [
     "lib/index.js",
-    "lib/runner.js"
+    "lib/runner.js",
+    "lib/toolchains.js"
   ],
   "license": "MIT",
   "peerDependencies": {

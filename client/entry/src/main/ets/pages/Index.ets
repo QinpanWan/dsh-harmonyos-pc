@@ -14,7 +14,7 @@ import { Constants, PermissionRisk } from '../common/Constants';
 import { PresetCatalog, PresetInfo } from '../common/PresetCatalog';
 import { Appearance, KEY_CONTENT_FONT_SIZE, KEY_DARK_THEME, Theme } from '../common/Theme';
 import { DshApiClient, DeepSeekClient } from '../service/DshApiClient';
-import { ChatMessage, DshSession } from '../model/Types';
+import { ChatMessage, DirectConversation, DshSession } from '../model/Types';
 import { Sidebar } from '../view/Sidebar';
 import { ChatView } from '../view/ChatView';
 import { SettingsPanel } from '../view/SettingsPanel';
@@ -88,8 +88,27 @@ struct Index {
   @State systemDecorVisible: boolean = false;
   private client: DshApiClient | null = null;
   private deepseek: DeepSeekClient = new DeepSeekClient();
+  /**
+   * 独立模式的本机会话清单（左侧栏那几行）。dsh 服务模式用服务端 `session/list`，
+   * 独立模式没有服务端，就用这一份：发第一条消息时按需建会话（与 dsh 模式 hero 发消息同语义），
+   * 「新会话」把当前这轮收进清单再开一轮新的。
+   */
+  private directConversations: DirectConversation[] = [];
   /** 当前会话的事件流（切换会话/断开时取消订阅） */
   private followStreamId: string = '';
+  /** 宿主全局事件流（`$events`）：侧栏会话列表的实时来源（api-session/added|removed|status|activity） */
+  private hostEventsStreamId: string = '';
+  /** 会话列表全量刷新的去抖计时器（-1 = 空闲） */
+  private sessionRefreshTimer: number = -1;
+  /** 全量刷新是否在飞（避免并发堆叠） */
+  private sessionRefreshInFlight: boolean = false;
+  /** 去抖期间又来了新事件：本轮结束后补一次全量 */
+  private sessionRefreshPending: boolean = false;
+  /**
+   * 正文是否「跟随到底部」。由 ChatView 的 onDidScroll 回报（读者往上翻就不再抢滚动），
+   * 发出消息 / 切换会话时重置为 true —— 上游 web 端同一套 atBottom 语义。
+   */
+  private followBottom: boolean = true;
   /** 登录会话 cookie（`dsh-auth-*`，本机回环签发，落盘复用） */
   private authCookie: string = '';
   private scroller: Scroller = new Scroller();
@@ -139,6 +158,7 @@ struct Index {
     if (this.client !== null) {
       this.client.closeMux();
     }
+    this.syncDirectCurrent();
     this.deepseek.stop();
     const service: DesktopUpdateService | null = this.updates;
     if (service !== null) {
@@ -192,6 +212,9 @@ struct Index {
   /** 按模式初始化：direct=内置直连（打开即用）；dsh=连接服务 */
   private applyMode(): void {
     if (this.mode === 'dsh') {
+      // 侧栏此时由服务端 `session/list` 接管：先清空本机会话那几行，连接成功后 refreshSessions 填回来
+      this.sessions = [];
+      this.currentSessionId = '';
       this.connect();
     } else {
       this.deepseek.stop();
@@ -199,9 +222,128 @@ struct Index {
       this.statusText = '独立模式（内置，打开即用）';
       this.connecting = false;
       this.syncDirectModelKeys();
+      // 切回独立模式时把当前正文收进本机会话清单（否则这段内容在侧栏里没有对应行）
+      this.adoptDirectConversation();
+      this.publishDirectSessions();
+      this.syncWorkspaceOptions(this.sessions);
     }
     // 预设列表始终可用：服务端拉不到（未连接）时用内置六套
     this.loadPresets();
+  }
+
+  // —— 独立模式的本机会话（左侧栏那几行） ——
+
+  /** 侧栏渲染的是 `sessions`：独立模式下它就是本机会话清单的投影。 */
+  private publishDirectSessions(): void {
+    if (this.mode !== 'direct') {
+      return;
+    }
+    const rows: DshSession[] = [];
+    for (let i = 0; i < this.directConversations.length; i++) {
+      const conv: DirectConversation = this.directConversations[i];
+      const row: DshSession = new DshSession(conv.sessionId);
+      row.title = conv.title;
+      row.updatedAt = conv.updatedAt;
+      row.cwd = conv.cwd;
+      rows.push(row);
+    }
+    this.sessions = this.sortSessions(rows);
+  }
+
+  private findDirectConversation(sessionId: string): DirectConversation | null {
+    for (let i = 0; i < this.directConversations.length; i++) {
+      if (this.directConversations[i].sessionId === sessionId) {
+        return this.directConversations[i];
+      }
+    }
+    return null;
+  }
+
+  /** 把当前正文与标题存回它所属的本机会话（切走 / 收尾时调用）。 */
+  private syncDirectCurrent(): void {
+    const conv: DirectConversation | null = this.findDirectConversation(this.currentSessionId);
+    if (conv === null) {
+      return;
+    }
+    conv.messages = this.messages;
+    if (conv.title.length === 0 && this.currentTitle.length > 0 && this.currentTitle !== '本机会话') {
+      conv.title = this.currentTitle;
+    }
+  }
+
+  /** 本机会话有活动（一轮结束 / 报错）：刷新时间并把它抬到最前。 */
+  private bumpDirectConversation(sessionId: string): void {
+    const conv: DirectConversation | null = this.findDirectConversation(sessionId);
+    if (conv === null) {
+      return;
+    }
+    conv.updatedAt = Date.now();
+    this.publishDirectSessions();
+  }
+
+  /**
+   * 建一条本机会话（独立模式的「hero 直接开聊」：发第一条消息就地建会话）。
+   * 与 dsh 模式的 `sendDsh` 同语义：本地先出现一行，再开始产出。
+   */
+  private beginDirectConversation(firstText: string): void {
+    const conv: DirectConversation = new DirectConversation('local-' + Date.now().toString());
+    conv.cwd = this.workspaceDirectory;
+    conv.title = firstText.length > Constants.TITLE_MAX_CHARS
+      ? firstText.slice(0, Constants.TITLE_MAX_CHARS) : firstText;
+    this.directConversations.unshift(conv);
+    this.currentSessionId = conv.sessionId;
+    this.currentTitle = conv.title;
+    this.publishDirectSessions();
+  }
+
+  /**
+   * 把当前正文收进一条本机会话（切回独立模式时用；已经在某条会话里就只同步）。
+   *
+   * ⚠️ 进来时 `currentSessionId` 可能还停在 **dsh 服务模式的会话 id** 上（从 dsh 服务模式切回来、
+   * 或在那里点了「新会话」），它不是本机会话：必须先把这枚悬挂 id 清掉。否则后面发消息时
+   * 「已经有 id」会跳过就地建会话（见 sendDirect），侧栏就一条行也不出 —— 主人报的
+   * 「发送消息之后不生成新会话在左侧」正是这条路径。
+   */
+  private adoptDirectConversation(): void {
+    const carriedTitle: string = this.currentTitle;
+    if (this.findDirectConversation(this.currentSessionId) === null) {
+      // 悬挂 id：正文也还没内容时连标题一起复位（标题栏/侧栏都以「新会话」起）
+      this.currentSessionId = '';
+      if (this.messages.length === 0) {
+        this.currentTitle = '';
+      }
+    }
+    if (this.messages.length === 0) {
+      return;
+    }
+    if (this.findDirectConversation(this.currentSessionId) !== null) {
+      this.syncDirectCurrent();
+      return;
+    }
+    const conv: DirectConversation = new DirectConversation('local-' + Date.now().toString());
+    conv.cwd = this.workspaceDirectory;
+    conv.title = carriedTitle.length > 0 && carriedTitle !== '本机会话'
+      ? carriedTitle : '本机会话';
+    conv.messages = this.messages;
+    this.directConversations.unshift(conv);
+    this.currentSessionId = conv.sessionId;
+    this.currentTitle = conv.title;
+    this.publishDirectSessions();
+  }
+
+  /** 独立模式下选中一条本机会话：存回当前、取出目标（消息一起带过去）。 */
+  private selectDirectSession(sessionId: string): void {
+    if (sessionId === this.currentSessionId && this.messages.length > 0) {
+      return;
+    }
+    this.deepseek.stop();
+    this.syncDirectCurrent();
+    const conv: DirectConversation | null = this.findDirectConversation(sessionId);
+    this.currentSessionId = conv === null ? '' : conv.sessionId;
+    this.currentTitle = conv === null || conv.title.length === 0 ? '本机会话' : conv.title;
+    this.messages = conv === null ? [] : conv.messages.slice();
+    this.streaming = false;
+    this.followBottom = true;
   }
 
   /** 保存登录 cookie（30 天有效，重启后直接复用） */
@@ -447,6 +589,8 @@ struct Index {
           this.statusText = '已连接';
           this.refreshSessions();
           this.refollowSession();
+          // 宿主事件流（$events）：会话列表的实时刷新来源，连上就订，重连后由 reopenStreams 原样重开
+          this.openHostEvents();
         },
         (msg: string) => {
           this.connected = false;
@@ -461,6 +605,7 @@ struct Index {
       this.refreshSessions();
       this.loadPermissionCatalog();
       this.loadModelCatalog();
+      this.openHostEvents();
     }).catch((e: BusinessError) => {
       this.connecting = false;
       this.connected = false;
@@ -526,54 +671,89 @@ struct Index {
     });
   }
 
-  private refreshSessions(): void {
-    const client = this.client;
-    if (client === null) {
-      return;
+  /**
+   * 一条 session 摘要（`session/list` 的行 / `api-session/added` 的载荷，同一份权威结构）
+   * → 侧栏投影。两处共用，避免「实时新增的行」与「全量刷新的行」字段对不上。
+   */
+  private parseSessionSummary(raw: Record<string, Object>): DshSession {
+    const session: DshSession = new DshSession(String(raw['sessionId']));
+    session.updatedAt = Number(raw['updatedAt']);
+    session.running = raw['running'] === true;
+    session.blank = raw['blank'] === true;
+    const cwd = raw['cwd'];
+    if (cwd !== undefined && cwd !== null) {
+      session.cwd = String(cwd);
     }
-    client.listSessions().then((items: Array<Record<string, Object>>) => {
-      const list: DshSession[] = [];
-      for (let i = 0; i < items.length; i++) {
-        const raw: Record<string, Object> = items[i];
-        const session: DshSession = new DshSession(String(raw['sessionId']));
-        session.updatedAt = Number(raw['updatedAt']);
-        session.running = raw['running'] === true;
-        session.blank = raw['blank'] === true;
-        const cwd = raw['cwd'];
-        if (cwd !== undefined && cwd !== null) {
-          session.cwd = String(cwd);
+    const proj: Record<string, Object> = raw['projections'] as Record<string, Object>;
+    if (proj !== undefined && proj !== null) {
+      const values: Record<string, Object> = proj['values'] as Record<string, Object>;
+      if (values !== undefined && values !== null) {
+        const title = values['title'];
+        if (title !== undefined && title !== null) {
+          session.title = String(title);
         }
-        const proj: Record<string, Object> = raw['projections'] as Record<string, Object>;
-        if (proj !== undefined && proj !== null) {
-          const values: Record<string, Object> = proj['values'] as Record<string, Object>;
-          if (values !== undefined && values !== null) {
-            const title = values['title'];
-            if (title !== undefined && title !== null) {
-              session.title = String(title);
-            }
-            const permission: Record<string, Object> = values['permissions'] as Record<string, Object>;
-            if (permission !== undefined && permission !== null && permission['currentValue'] !== undefined) {
-              session.permission = String(permission['currentValue']);
-            }
-            const preset = values['agentPreset'];
-            if (preset !== undefined && preset !== null) {
-              session.agentPreset = String(preset);
-            }
-            // modelSelection 投影：lastUsed（已经用过的）/ next（下一次将用的）
-            const selection: Record<string, Object> = values['modelSelection'] as Record<string, Object>;
-            if (selection !== undefined && selection !== null) {
-              let used: Record<string, Object> = selection['lastUsed'] as Record<string, Object>;
-              if (used === undefined || used === null) {
-                used = selection['next'] as Record<string, Object>;
-              }
-              if (used !== undefined && used !== null && used['model'] !== undefined) {
-                session.model = String(used['model']);
-                session.modelProvider = used['provider'] === undefined ? '' : String(used['provider']);
-              }
-            }
+        const permission: Record<string, Object> = values['permissions'] as Record<string, Object>;
+        if (permission !== undefined && permission !== null && permission['currentValue'] !== undefined) {
+          session.permission = String(permission['currentValue']);
+        }
+        const preset = values['agentPreset'];
+        if (preset !== undefined && preset !== null) {
+          session.agentPreset = String(preset);
+        }
+        // modelSelection 投影：lastUsed（已经用过的）/ next（下一次将用的）
+        const selection: Record<string, Object> = values['modelSelection'] as Record<string, Object>;
+        if (selection !== undefined && selection !== null) {
+          let used: Record<string, Object> = selection['lastUsed'] as Record<string, Object>;
+          if (used === undefined || used === null) {
+            used = selection['next'] as Record<string, Object>;
+          }
+          if (used !== undefined && used !== null && used['model'] !== undefined) {
+            session.model = String(used['model']);
+            session.modelProvider = used['provider'] === undefined ? '' : String(used['provider']);
           }
         }
-        list.push(session);
+      }
+    }
+    return session;
+  }
+
+  /** 会话行按 updatedAt 降序（与 session/list 的返回顺序一致；新会话/新活动在最上面）。 */
+  private sortSessions(list: DshSession[]): DshSession[] {
+    const sorted: DshSession[] = list.slice();
+    sorted.sort((a: DshSession, b: DshSession): number => b.updatedAt - a.updatedAt);
+    return sorted;
+  }
+
+  /** 全量刷新去抖：短时间内多条事件只打一次 session/list（一份 ~190KB / ~1s）。 */
+  private scheduleSessionRefresh(delay: number): void {
+    if (this.sessionRefreshTimer !== -1) {
+      clearTimeout(this.sessionRefreshTimer);
+    }
+    this.sessionRefreshTimer = setTimeout(() => {
+      this.sessionRefreshTimer = -1;
+      if (this.sessionRefreshInFlight) {
+        this.sessionRefreshPending = true;
+        return;
+      }
+      this.refreshSessions();
+    }, delay);
+  }
+
+  private refreshSessions(): void {
+    const client = this.client;
+    if (client === null || this.sessionRefreshInFlight) {
+      return;
+    }
+    this.sessionRefreshInFlight = true;
+    client.listSessions().then((items: Array<Record<string, Object>>) => {
+      if (this.mode !== 'dsh') {
+        // 已经切回独立模式：这份服务端列表会盖掉 `directConversations` 的投影（侧栏瞬间变成 286 条服务端会话）
+        this.releaseSessionRefresh();
+        return;
+      }
+      const list: DshSession[] = [];
+      for (let i = 0; i < items.length; i++) {
+        list.push(this.parseSessionSummary(items[i]));
       }
       // 合并旧标题（避免刷新时丢失本地自动标题）
       if (this.sessions.length > 0) {
@@ -591,6 +771,7 @@ struct Index {
       this.sessions = list;
       this.syncWorkspaceOptions(list);
       this.syncCurrentSessionState();
+      this.releaseSessionRefresh();
       // 自动选中第一个非空会话
       if (this.currentSessionId.length === 0 && list.length > 0) {
         for (let i = 0; i < list.length; i++) {
@@ -603,7 +784,17 @@ struct Index {
       }
     }).catch((e: BusinessError) => {
       this.statusText = String(e);
+      this.releaseSessionRefresh();
     });
+  }
+
+  /** 全量刷新收尾：解锁并兑现去抖期间挂起的那一次。 */
+  private releaseSessionRefresh(): void {
+    this.sessionRefreshInFlight = false;
+    if (this.sessionRefreshPending) {
+      this.sessionRefreshPending = false;
+      this.scheduleSessionRefresh(200);
+    }
   }
 
   // —— 首页选择器（工作区 / 工作区权限 / 对话模式） ——
@@ -688,8 +879,170 @@ struct Index {
     this.followCurrentSession();
   }
 
+  /**
+   * 订阅宿主全局事件流（`$events`）。这是侧栏「实时刷新出最新会话」的唯一来源：
+   * 宿主把 `api-session/added`（新会话）/ `removed` / `status`（运行位）/ `activity`（活动时间）
+   * 按原样转发给客户端，官方 web 端也是靠这一路 `ctx.remote.$on` 维持列表的。
+   */
+  private openHostEvents(): void {
+    const client = this.client;
+    if (client === null || this.hostEventsStreamId.length > 0) {
+      return;
+    }
+    this.hostEventsStreamId = client.openHostEvents({
+      onFrame: (value: Record<string, Object>) => { this.onHostEvent(value); },
+      onEnd: (reason: string) => {
+        this.hostEventsStreamId = '';
+        if (reason.length > 0) {
+          this.statusText = reason;
+        }
+      }
+    });
+  }
+
+  /**
+   * 宿主事件 → 侧栏就地更新（不重拉 session/list：286 条要 ~190KB / ~1s）。
+   * 事件载荷与 `session/list` 的行同源，字段够用；只有本地还没有这一行时才兜底全量刷新。
+   */
+  private onHostEvent(value: Record<string, Object>): void {
+    if (this.mode !== 'dsh') {
+      // 宿主事件流是切模式之前开的：独立模式下侧栏渲染的是本机会话，不能被服务端行混进来
+      return;
+    }
+    const kind: string = String(value['type']);
+    if (kind !== 'emit') {
+      return; // ready = 事件源就绪，没有业务负载
+    }
+    const name: string = String(value['event']);
+    const args: Array<Object> = value['args'] as Array<Object>;
+    if (args === undefined || args === null || args.length === 0) {
+      return;
+    }
+    // 真机排障：`hdc shell "hilog | grep DshMux"` 能看到宿主事件是否真的在往下走
+    hilog.info(0xD004, 'DshMux', '宿主事件 %{public}s %{public}s', name, String(args[0]));
+    if (name === 'api-session/added') {
+      const raw: Record<string, Object> = args[0] as Record<string, Object>;
+      if (raw !== undefined && raw !== null) {
+        this.upsertSession(this.parseSessionSummary(raw));
+      }
+      return;
+    }
+    const sessionId: string = String(args[0]);
+    if (name === 'api-session/removed') {
+      this.removeSession(sessionId);
+      return;
+    }
+    if (name === 'api-session/status') {
+      this.markSessionRunning(sessionId, args.length > 1 && args[1] === true);
+      return;
+    }
+    if (name === 'api-session/activity') {
+      const at: number = args.length > 1 ? Number(args[1]) : Date.now();
+      this.touchSession(sessionId, at);
+      return;
+    }
+    if (name === 'api-session/error') {
+      // 只管一行报错时本地可能还没有这条会话：交给一次去抖全量刷新兜底
+      this.scheduleSessionRefresh(800);
+    }
+  }
+
+  /** 新会话（含别处创建的）：本地插入并按 activity 时间排到最前。 */
+  private upsertSession(session: DshSession): void {
+    const list: DshSession[] = this.sessions.slice();
+    let replaced: boolean = false;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].sessionId === session.sessionId) {
+        if (session.title.length === 0) {
+          session.title = list[i].title;
+        }
+        list[i] = session;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      if (session.updatedAt <= 0) {
+        session.updatedAt = Date.now();
+      }
+      list.push(session);
+    }
+    this.sessions = this.sortSessions(list);
+    this.syncWorkspaceOptions(this.sessions);
+  }
+
+  /** 会话被移除（归档 / 关闭）：从侧栏摘掉；如果正是当前会话就连正文一起清。 */
+  private removeSession(sessionId: string): void {
+    const list: DshSession[] = [];
+    let removed: boolean = false;
+    for (let i = 0; i < this.sessions.length; i++) {
+      if (this.sessions[i].sessionId === sessionId) {
+        removed = true;
+        continue;
+      }
+      list.push(this.sessions[i]);
+    }
+    if (!removed) {
+      return;
+    }
+    this.sessions = list;
+    if (this.currentSessionId === sessionId) {
+      this.currentSessionId = '';
+      this.currentTitle = '';
+      this.sessionPreset = '';
+      this.currentPermission = '';
+      this.messages = [];
+      this.streaming = false;
+    }
+  }
+
+  /** 运行位翻转（运行中 = 侧栏那一行的小圆点） */
+  private markSessionRunning(sessionId: string, running: boolean): void {
+    const list: DshSession[] = this.sessions.slice();
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].sessionId !== sessionId) {
+        continue;
+      }
+      if (list[i].running === running) {
+        return;
+      }
+      list[i].running = running;
+      this.sessions = list;
+      return;
+    }
+    this.scheduleSessionRefresh(800);
+  }
+
+  /** 活动时间前移（别处发了消息 / 定时任务跑了一轮）：把这一行提到最前。 */
+  private touchSession(sessionId: string, updatedAt: number): void {
+    const list: DshSession[] = this.sessions.slice();
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].sessionId !== sessionId) {
+        continue;
+      }
+      const at: number = updatedAt > 0 ? updatedAt : Date.now();
+      if (list[i].updatedAt === at && i === 0) {
+        return; // 已经在最前且时间没变：不制造无谓重建
+      }
+      list[i].updatedAt = at;
+      this.sessions = this.sortSessions(list);
+      // 这一行还没有标题（刚在别处建出来、`session/title` 只走会话自己的 follow 流）：
+      // 借一次去抖全量把标题补上，免得侧栏一直挂着「新会话」
+      if (list[i].title.length === 0) {
+        this.scheduleSessionRefresh(800);
+      }
+      return;
+    }
+    // 本地没有这一行（别处新建的会话）：交给一次去抖全量刷新
+    this.scheduleSessionRefresh(200);
+  }
+
   /** 事件流下行帧：snapshot（历史+投影）/ event（durable）/ assistant-stream（实时增量） */
   private onFollowValue(value: Record<string, Object>): void {
+    if (this.mode !== 'dsh') {
+      // 流是切模式之前开的、服务端仍在下发：别拿服务端快照/增量改写独立模式的正文
+      return;
+    }
     const kind: string = String(value['type']);
     if (kind === 'snapshot') {
       this.applySnapshot(value);
@@ -777,7 +1130,13 @@ struct Index {
     this.scrollToBottom();
   }
 
-  /** 实时增量帧（assistant-stream）：文本/思考逐字追加 */
+  /**
+   * 实时增量帧（assistant-stream）：文本 / 思考逐字追加。
+   *
+   * 帧来自宿主 `assistantStream: true` 的 follow 流（官方 web 端的同一路）：
+   * `start` → `chunk`（text-delta / reasoning-delta / block-start 等）→ `end`。
+   * 这里只在第一个 text/reasoning 增量上建气泡，避免 `block-start` 先造出一个空气泡。
+   */
   private applyAssistantFrame(frame: Record<string, Object>): void {
     const kind: string = String(frame['type']);
     if (kind === 'start') {
@@ -796,7 +1155,7 @@ struct Index {
       return;
     }
     const chunkType: string = String(chunk['type']);
-    if (chunkType !== 'text-delta' && chunkType !== 'reasoning-delta') {
+    if (chunkType !== 'text-delta' && chunkType !== 'reasoning-delta' && chunkType !== 'block-start') {
       return;
     }
     const list: ChatMessage[] = this.messages.slice();
@@ -808,9 +1167,20 @@ struct Index {
       }
     }
     if (current === null) {
+      if (chunkType !== 'text-delta' && chunkType !== 'reasoning-delta') {
+        return; // 还没有气泡时 block-start 单独到达：等第一个增量再说
+      }
       current = new ChatMessage('stream-' + Date.now().toString(36), 'assistant', Date.now());
       current.status = 'streaming';
       list.push(current);
+    }
+    if (chunkType === 'block-start') {
+      // 同一次尝试里的第 2..n 个思考块：换行接上，别把两段粘成一行
+      if (String(chunk['blockType']) === 'reasoning' && current.reasoning.length > 0) {
+        current.reasoning += '\n\n';
+        this.messages = list;
+      }
+      return;
     }
     const text: string = chunk['text'] === undefined ? '' : String(chunk['text']);
     if (chunkType === 'text-delta') {
@@ -904,6 +1274,7 @@ struct Index {
     if (this.mode === 'dsh') {
       return;
     }
+    this.syncDirectCurrent();
     this.mode = 'dsh';
     this.saveMode('dsh');
     this.deepseek.stop();
@@ -931,11 +1302,16 @@ struct Index {
 
   private newSession(): void {
     if (this.mode === 'direct') {
-      // 内置直连：新建会话 = 清空本地消息
+      // 内置直连：新建会话 = 把当前这轮收进本机会话清单，再开一轮空的
+      // （清单留在侧栏可切回；新会话行等第一条消息发出去时才落，不制造空行）
       this.deepseek.stop();
+      this.syncDirectCurrent();
       this.messages = [];
       this.currentTitle = '本机会话';
       this.streaming = false;
+      this.currentSessionId = '';
+      this.followBottom = true;
+      this.publishDirectSessions();
       return;
     }
     const client = this.client;
@@ -958,7 +1334,8 @@ struct Index {
 
   private selectSession(sessionId: string): void {
     if (this.mode === 'direct') {
-      return; // 直连模式为单会话工作区
+      this.selectDirectSession(sessionId);
+      return;
     }
     const client = this.client;
     if (client === null) {
@@ -977,6 +1354,8 @@ struct Index {
     }
     this.messages = [];
     this.streaming = false;
+    // 换了一条会话就是要看它的最新内容：重新打开跟随（读者上一条会话里的上翻状态不带过来）
+    this.followBottom = true;
     this.currentPermission = '';
     this.sessionPreset = '';
     for (let i = 0; i < this.sessions.length; i++) {
@@ -991,6 +1370,15 @@ struct Index {
   }
 
   private updateSessionTitleLocal(sessionId: string, title: string): void {
+    if (this.mode === 'direct') {
+      // 独立模式的行是 directConversations 的投影，改投影没用：改本体再重投影
+      const conv: DirectConversation | null = this.findDirectConversation(sessionId);
+      if (conv !== null) {
+        conv.title = title;
+        this.publishDirectSessions();
+      }
+      return;
+    }
     const list: DshSession[] = this.sessions.slice();
     for (let i = 0; i < list.length; i++) {
       if (list[i].sessionId === sessionId) {
@@ -1020,6 +1408,13 @@ struct Index {
       this.showSettings = true;
       return;
     }
+    // 本机会话：当前 id 不是本机会话就地建一条（与 dsh 模式 hero 直接开聊同语义），
+    // 这样侧栏「发消息即出现最新会话」在独立模式下同样成立。
+    // ⚠️ 判据是「这条 id 在不在本机会话清单里」，不是「id 空不空」：从 dsh 服务模式切回来时
+    // currentSessionId 会带着服务端会话 id（非空但本地没这一行），按空判就会漏建 ⇒ 侧栏不出行。
+    if (this.findDirectConversation(this.currentSessionId) === null) {
+      this.beginDirectConversation(text);
+    }
     // 乐观插入用户消息
     const userMsg: ChatMessage = new ChatMessage('local-' + Date.now().toString(), 'user', Date.now());
     userMsg.text = text;
@@ -1042,7 +1437,7 @@ struct Index {
     list2.push(assistant);
     this.messages = list2;
     this.streaming = true;
-    this.scrollToBottom();
+    this.scrollToBottom(true);
     // 独立模式的「对话模式」= 该预设的 persona 系统提示（rawfile/presets.json），
     // {{model}} / {{cwd}} 就地替换成本机值；没选模式/提示缺失时退化为无 system 提示。
     const modeId: string = this.currentPreset.length > 0 ? this.currentPreset : 'harmony-chat';
@@ -1072,11 +1467,14 @@ struct Index {
         }
         this.messages = msgs;
         this.streaming = false;
-        if (this.currentTitle.length === 0) {
+        if (this.currentTitle.length === 0 || this.currentTitle === '本机会话') {
           const t: string = text.length > Constants.TITLE_MAX_CHARS ?
             text.slice(0, Constants.TITLE_MAX_CHARS) : text;
           this.currentTitle = t;
+          this.updateSessionTitleLocal(this.currentSessionId, t);
         }
+        this.syncDirectCurrent();
+        this.bumpDirectConversation(this.currentSessionId);
       },
       (err: string) => {
         const msgs: ChatMessage[] = this.messages.slice();
@@ -1090,8 +1488,23 @@ struct Index {
         this.messages = msgs;
         this.streaming = false;
         this.statusText = err;
+        this.syncDirectCurrent();
+        this.bumpDirectConversation(this.currentSessionId);
       },
-      systemPrompt);
+      systemPrompt,
+      (reasoning: string) => {
+        // 推理模型（deepseek-v4-flash / reasoner 系）先吐思维链：写进助手的 reasoning，
+        // MessageItem 的「思考中」披露行实时跟着长（含跟随滚动）。
+        const msgs: ChatMessage[] = this.messages.slice();
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'assistant' && msgs[i].status === 'streaming') {
+            msgs[i].reasoning += reasoning;
+            break;
+          }
+        }
+        this.messages = msgs;
+        this.scrollToBottom();
+      });
   }
 
   /** dsh 服务模式：走 dsh 的 session/prompt + `/api/remote.mux` WebSocket 事件流 */
@@ -1108,7 +1521,7 @@ struct Index {
     list.push(userMsg);
     this.messages = list;
     this.streaming = true;
-    this.scrollToBottom();
+    this.scrollToBottom(true);
     if (this.currentSessionId.length === 0) {
       // 首页直接开聊（上游同样按需建会话）：先建会话（带工作区 + 对话模式）再发这条
       client.createSession(this.workspaceDirectory, this.currentPreset).then((sessionId: string) => {
@@ -1163,6 +1576,8 @@ struct Index {
         }
       }
       this.messages = msgs;
+      this.syncDirectCurrent();
+      this.bumpDirectConversation(this.currentSessionId);
       return;
     }
     const client = this.client;
@@ -1228,16 +1643,24 @@ struct Index {
     if (type === 'assistant/message') {
       const message: Record<string, Object> = data['message'] as Record<string, Object>;
       const id: string = String(message['id']);
-      const text: string = this.blocksToText(message['content'] as Array<Record<string, Object>>);
+      const blocks: Array<Record<string, Object>> = message['content'] as Array<Record<string, Object>>;
+      const text: string = this.blocksToText(blocks);
+      // 落库的 assistant/message 自带 `reasoning` 块（会话历史/重连快照只有这一份）：
+      // 不抽出来的话，切会话或刷一次就看不见思维链了。
+      const reasoning: string = this.blocksToReasoning(blocks);
       if (current !== null && current.status === 'streaming') {
         current.id = id;
         current.text = text;
+        if (reasoning.length > 0) {
+          current.reasoning = reasoning;
+        }
         current.status = 'done';
         current.time = time;
         return null;
       }
       const msg: ChatMessage = new ChatMessage(id, 'assistant', time);
       msg.text = text;
+      msg.reasoning = reasoning;
       msg.status = 'done';
       list.push(msg);
       return current;
@@ -1289,6 +1712,27 @@ struct Index {
     return current;
   }
 
+  /** 内容块里的 `reasoning` 块拼成思维链正文（与 blocksToText 同一约定：只认文本块）。 */
+  private blocksToReasoning(blocks: Array<Record<string, Object>>): string {
+    if (blocks === undefined || blocks === null) {
+      return '';
+    }
+    let text: string = '';
+    for (let i = 0; i < blocks.length; i++) {
+      const block: Record<string, Object> = blocks[i];
+      if (block === undefined || block === null) {
+        continue;
+      }
+      if (String(block['type']) === 'reasoning') {
+        const t = block['text'];
+        if (t !== undefined && t !== null) {
+          text += String(t);
+        }
+      }
+    }
+    return text;
+  }
+
   private blocksToText(blocks: Array<Record<string, Object>>): string {
     if (blocks === undefined || blocks === null) {
       return '';
@@ -1309,9 +1753,27 @@ struct Index {
     return text;
   }
 
-  private scrollToBottom(): void {
+  /**
+   * 正文滚到底。**只在「跟随中」才抢滚动**：读者主动往上翻过之后（ChatView 的
+   * onDidScroll 会把 atEnd=false 报上来）就不再把人拽回底部，改由右下角「回到底部」按钮接手。
+   * @param force - 忽略跟随开关（发消息 / 切会话这种「本来就要看最新」的时刻）
+   */
+  private scrollToBottom(force: boolean = false): void {
+    if (force) {
+      this.followBottom = true;
+    }
+    if (!this.followBottom) {
+      return;
+    }
     setTimeout(() => {
-      this.scroller.scrollEdge(Edge.Bottom);
+      if (!this.followBottom) {
+        return;
+      }
+      try {
+        this.scroller.scrollEdge(Edge.Bottom);
+      } catch (e) {
+        // 列表尚未挂载（hero 相位 / 切会话瞬间）：无需滚动
+      }
     }, 50);
   }
 
@@ -1731,6 +2193,7 @@ struct Index {
               statusText: this.statusText,
               columnWidth: this.chatColumnWidth(),
               scroller: this.scroller,
+              onFollowState: (atEnd: boolean) => { this.followBottom = atEnd; },
               workspaceOptions: this.workspaceOptions,
               workspaceAvailable: this.workspaceAvailable(),
               workspaceReason: this.workspaceReason(),
@@ -1831,6 +2294,9 @@ struct Index {
             appVersion: this.appVersion,
             baselineVersion: this.shell.upstream.appVersion,
             onModeChange: (m: string) => {
+              if (this.mode === 'direct' && m !== 'direct') {
+                this.syncDirectCurrent();
+              }
               this.mode = m;
               this.saveMode(m);
               if (m === 'dsh') {

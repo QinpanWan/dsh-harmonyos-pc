@@ -45,12 +45,24 @@ import { createRequire } from 'node:module';
 import { Transform } from 'node:stream';
 import * as _zlib from 'node:zlib';
 const _require = createRequire('${DSH_ROOT}');
-const _fzstd = _require('fzstd');
 
 export * from 'node:zlib';
 export default _zlib;
 
+// 运行时能力探测（**Node 24 优先**）：node >= 22.18 / 23.8 自带原生 zstd。
+// 原生在就用原生（快、且与官方语义一致），只有缺的运行时（鸿蒙 deveco node v22.7）才落到下面的纯 JS / WASM 垫片。
+const HAS = {
+  decompressSync: typeof _zlib.zstdDecompressSync === 'function',
+  decompress: typeof _zlib.zstdDecompress === 'function',
+  compress: typeof _zlib.zstdCompress === 'function',
+  compressSync: typeof _zlib.zstdCompressSync === 'function',
+  streamDecompress: typeof _zlib.createZstdDecompress === 'function',
+  streamCompress: typeof _zlib.createZstdCompress === 'function',
+};
+
+let _fzstd = null;
 function _decode(input) {
+  if (!_fzstd) _fzstd = _require('fzstd');
   const buf = typeof input === 'string' ? Buffer.from(input, 'utf8') : input;
   return Buffer.from(_fzstd.decompress(buf));
 }
@@ -69,6 +81,7 @@ function _codec() {
 }
 
 export function zstdDecompress(input, options, callback) {
+  if (HAS.decompress) return _zlib.zstdDecompress(input, options, callback);
   if (typeof options === 'function') { callback = options; options = undefined; }
   let out;
   try { out = _decode(input); }
@@ -81,10 +94,12 @@ export function zstdDecompress(input, options, callback) {
 }
 
 export function zstdDecompressSync(input) {
+  if (HAS.decompressSync) return _zlib.zstdDecompressSync(input);
   return _decode(input);
 }
 
 export async function zstdCompress(input, options, callback) {
+  if (HAS.compress) return _zlib.zstdCompress(input, options, callback);
   if (typeof options === 'function') { callback = options; options = undefined; }
   const cb = callback;
   if (input == null) {
@@ -105,18 +120,23 @@ export async function zstdCompress(input, options, callback) {
   }
 }
 
-// dsh probes the returned object for a Node-private stream shape; make the
-// probe reject so it falls back to the sync one-shot decoder (zstdDecompressSync
-// above) instead of expecting a native zstd stream handle this build lacks.
-export function createZstdDecompress() {
+export function zstdCompressSync(input, options) {
+  if (HAS.compressSync) return _zlib.zstdCompressSync(input, options);
+  throw Object.assign(new Error('zstd: zstdCompressSync unavailable on this runtime'), { code: 'ERR_ZSTD_NOT_SUPPORTED' });
+}
+
+// dsh probes the returned object for a Node-private stream shape; on runtimes without a native
+// zstd stream, make the probe reject so it falls back to the sync one-shot decoder instead.
+export function createZstdDecompress(options) {
+  if (HAS.streamDecompress) return _zlib.createZstdDecompress(options);
   return { _handle: null, _writeState: new Uint32Array(0), close() {} };
 }
 
 // v0/v1 → v2 session migration pipes event rows through a real Zstd stream
-// (createZstdCompress). Node >=22.18 has a native one; v22.7 does not, so buffer
-// the whole input and emit a single WASM-encoded frame at flush. The reader's
-// frame scanner decodes each frame independently, so one big frame is fine.
-export function createZstdCompress() {
+// (createZstdCompress). Native when available; otherwise buffer the whole input and emit
+// WASM-encoded frames at flush (the reader's frame scanner decodes each frame independently).
+export function createZstdCompress(options) {
+  if (HAS.streamCompress) return _zlib.createZstdCompress(options);
   const chunks = [];
   return new Transform({
     transform(chunk, _encoding, callback) {

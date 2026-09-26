@@ -7,7 +7,10 @@
  */
 import { Theme } from '../common/Theme';
 import { ChatMessage, TextBlock } from '../model/Types';
-import { IconCopyOutline, IconCodeOutline, IconCheckCircleOutline, IconLoadingOutline } from '../common/Icons';
+import {
+  IconCheckCircleOutline, IconChevronDownOutline, IconChevronUpOutline, IconCodeOutline,
+  IconCopyOutline, IconLoadingOutline, IconThinkOutline,
+} from '../common/Icons';
 
 @Component
 export struct MessageItem {
@@ -16,6 +19,8 @@ export struct MessageItem {
   onCopy: (text: string) => void = (text: string) => {};
   @StorageProp('dshDarkTheme') dark: boolean = true;
   @StorageProp('dshContentFontSize') contentFontSize: number = 14;
+  /** 思维链是否展开（上游 ReasoningRow 的 data-expanded：默认收起，只露一行实时摘要） */
+  @State thinkOpen: boolean = false;
 
   build() {
     Column() {
@@ -73,18 +78,23 @@ export struct MessageItem {
     .alignItems(HorizontalAlign.End)
   }
 
+  /**
+   * 消息正文的 ForEach 键。
+   * **必须带上内容**：ArkUI 的 ForEach 只按 key 判等，key 不变就当成「同一个 item」不重绘；
+   * 流式正文在长，若键只有 `消息id-下标`，助手气泡会一直空着（主人报的「发了没反应」就是这个）。
+   * 键里带 `isCode` 与文本长度 → 每个增量都换键，正文才会跟着刷。
+   */
+  private blockKey(block: TextBlock, index: number): string {
+    return this.message.id + '-' + index.toString()
+      + (block.isCode ? '-c-' : '-t-') + block.text.length.toString();
+  }
+
   /** 助手消息：正文（markdown 阶梯）+ 动作排。 */
   @Builder
   assistantRow() {
     Column({ space: 6 }) {
-      if (this.message.reasoning.length > 0 && this.message.text.length === 0) {
-        Row({ space: 6 }) {
-          Text('思考中')
-            .fontSize(Theme.secondaryFontSize())
-            .lineHeight(Theme.LINE_SECONDARY + Theme.secondaryDelta())
-            .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
-        }
-        .margin({ bottom: 2 })
+      if (this.message.reasoning.length > 0) {
+        this.reasoningRow()
       }
       ForEach(this.splitBlocks(this.message.text), (block: TextBlock, index: number) => {
         if (block.isCode) {
@@ -97,7 +107,7 @@ export struct MessageItem {
             .copyOption(CopyOptions.LocalDevice)
             .width('100%')
         }
-      }, (block: TextBlock, index: number) => this.message.id + '-' + index.toString())
+      }, (block: TextBlock, index: number) => this.blockKey(block, index))
 
       if (this.message.status === 'streaming') {
         Text('▍')
@@ -128,6 +138,96 @@ export struct MessageItem {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
+  }
+
+  /**
+   * 思维链披露行（对齐上游 packages/client/ui-chat/src/client/chat/ReasoningRow）：
+   * 图标 + 「思考」标题 + **一行实时摘要**；点标题展开看完整思考，再点收起。
+   *
+   * 摘要取哪一行与上游同一取舍：生成中取**最后一行**（跟着模型的思考尾巴走，这就是「实时」），
+   * 结束取**首行**（一眼看出这段思考在解决什么）。`**` 粗体记号按上游去掉。
+   * 展开的正文由外层消息列表滚动（列表跟随到底部 = 思考内容一直在视野里），不再套内层滚动条。
+   */
+  @Builder
+  reasoningRow() {
+    Column({ space: 4 }) {
+      Row({ space: 6 }) {
+        IconThinkOutline({ size: 14, color: Theme.palette(this.dark).dswAliasLabelSecondary })
+        Text(this.reasoningTitle())
+          .fontSize(Theme.secondaryFontSize())
+          .lineHeight(20 + Theme.secondaryDelta())
+          .fontColor(Theme.palette(this.dark).dswAliasLabelSecondary)
+        Text(this.reasoningSummary())
+          .fontSize(Theme.secondaryFontSize())
+          .lineHeight(20 + Theme.secondaryDelta())
+          .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+          .maxLines(this.message.status === 'streaming' ? 2 : 1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+        if (this.thinkOpen) {
+          IconChevronUpOutline({ size: 14, color: Theme.palette(this.dark).dswAliasLabelSecondary })
+        } else {
+          IconChevronDownOutline({ size: 14, color: Theme.palette(this.dark).dswAliasLabelSecondary })
+        }
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .borderRadius(Theme.RADIUS_SM)
+      .onClick(() => {
+        this.thinkOpen = !this.thinkOpen;
+      })
+
+      if (this.thinkOpen) {
+        Text(this.message.reasoning)
+          .fontSize(Theme.secondaryFontSize())
+          .lineHeight(20 + Theme.secondaryDelta())
+          .fontColor(Theme.palette(this.dark).dswAliasLabelTertiary)
+          .width('100%')
+          .padding({ left: 20 })
+          .copyOption(CopyOptions.LocalDevice)
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .margin({ bottom: 2 })
+  }
+
+  /** 披露行标题：生成中说「思考中」，落库后说「思考」（上游 message.think）。 */
+  private reasoningTitle(): string {
+    return this.message.status === 'streaming' ? '思考中' : '思考';
+  }
+
+  /** 摘要行：生成中=最后一行（实时尾巴），结束=首行；去掉 `**` 并限长，避免超长单行拖慢布局。 */
+  private reasoningSummary(): string {
+    const text: string = this.message.reasoning;
+    if (text.length === 0) {
+      return '';
+    }
+    const line: string = this.message.status === 'streaming' ? MessageItem.lastLine(text) : MessageItem.firstLine(text);
+    const plain: string = line.split('**').join('').trim();
+    return plain.length > 160 ? plain.slice(0, 160) : plain;
+  }
+
+  private static firstLine(text: string): string {
+    const newline: number = text.indexOf('\n');
+    const line: string = newline === -1 ? text : text.slice(0, newline);
+    return line.charAt(line.length - 1) === '\r' ? line.slice(0, line.length - 1) : line;
+  }
+
+  private static lastLine(text: string): string {
+    // 去掉行尾空白（最后一段可能刚好停在换行/缩进上），再取最后一行
+    let end: number = text.length;
+    while (end > 0) {
+      const ch: string = text.charAt(end - 1);
+      if (ch !== '\n' && ch !== '\r' && ch !== ' ' && ch !== '\t') {
+        break;
+      }
+      end--;
+    }
+    const visible: string = text.slice(0, end);
+    const newline: number = visible.lastIndexOf('\n');
+    const line: string = newline === -1 ? visible : visible.slice(newline + 1);
+    return line.charAt(0) === '\r' ? line.slice(1) : line;
   }
 
   /** 代码块（--dsw-alias-markdown-code-block + banner）。 */

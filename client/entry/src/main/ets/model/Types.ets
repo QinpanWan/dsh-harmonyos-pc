@@ -57,6 +57,26 @@ export class DshSession {
 }
 
 /**
+ * 独立模式（内置直连）的本机会话：**没有 dsh 服务端**，所以会话行与正文都只活在客户端。
+ * 侧栏用「本机会话」这一份清单渲染（DshSession 的同一套字段），正文按需在
+ * `messages` 与该会话之间来回搬（见 Index.directConversations）。
+ */
+export class DirectConversation {
+  sessionId: string = '';
+  title: string = '';
+  updatedAt: number = 0;
+  /** 会话的工作区（新建时的 `workspaceDirectory`，只用于侧栏/胶囊显示） */
+  cwd: string = '';
+  /** 该会话的消息列（切走时从 `messages` 存回，切回时取出） */
+  messages: ChatMessage[] = [];
+
+  constructor(id: string) {
+    this.sessionId = id;
+    this.updatedAt = Date.now();
+  }
+}
+
+/**
  * 富文本渲染块：用于消息文本中代码块与普通文本的区分
  */
 export class TextBlock {

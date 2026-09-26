@@ -20,6 +20,7 @@
 import { http, webSocket } from '@kit.NetworkKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /**
  * 一条 Remote 流（session/follow）的下行接收口。
@@ -30,6 +31,14 @@ export interface DshStreamSink {
   onFrame: (value: Record<string, Object>) => void;
   onEnd: (reason: string) => void;
 }
+
+/**
+ * mux 事件流日志域。hilog 的**应用**域范围是 [0x0, 0xFFFF]（`hilog -h` 的 Domain description），
+ * 超出范围的域会被静默丢弃（0xD0042 那种 5 位十六进制就属于这种，真机一条都抓不到）。
+ * 真机排障：`hdc shell "hilog | grep DshMux"`（与 `DshDirect` 同域，靠 TAG 区分）。
+ * 采样点都取「一次性的状态跃迁」（连上/断开/流错误），不做逐帧打印（一次回答约 200 帧）。
+ */
+const MUX_LOG_DOMAIN: number = 0xD004;
 
 /** 一条已登记的流：端点 + 打开参数（重连后按原样重开）。 */
 class DshStream {
@@ -397,13 +406,21 @@ export class DshApiClient {
     if (this.cookie.length > 0) {
       header['Cookie'] = this.cookie;
     }
-    const options: webSocket.WebSocketRequestOptions = { header: header };
+    // ⚠️ 必须带 `supportOriginPort: true`（API 26 起）：ArkTS 的 netstack 默认把握手
+    // `Origin` 写成**不带端口**的 `ws://<host>`（源码：websocket_exec.cpp 的 ParseHost，
+    // `origin = supportOriginPort ? host : address`）。dsh 的 Host/Origin fence
+    // （dsh-client-connection 的 isTrustedApiRequest：`new URL(origin).host === host`）
+    // 拿它跟带端口的 `Host`（127.0.0.1:3080）比 → 403，握手直接被拒 ⇒ 事件流永远连不上，
+    // 侧栏实时刷新、思维链/正文流式全都收不到（真机实测：`UNEXPECTED 403`）。
+    // 打开这一项后 Origin 变成 `ws://<host>:<port>`，与 Host 同端口，fence 放行。
+    const options: webSocket.WebSocketRequestOptions = { header: header, supportOriginPort: true };
     const socket: webSocket.WebSocket = webSocket.createWebSocket();
     this.socket = socket;
     this.socketOpen = false;
     socket.on('open', (err: BusinessError, value: Object) => {
       this.socketOpen = true;
       this.reconnectAttempt = 0;
+      hilog.info(MUX_LOG_DOMAIN, 'DshMux', '事件流已连接 %{public}s', this.wsUrl());
       this.reopenStreams();
       if (this.onOpenCallback !== null) {
         this.onOpenCallback();
@@ -423,19 +440,27 @@ export class DshApiClient {
     });
     socket.on('close', (err: BusinessError, value: webSocket.CloseResult) => {
       this.socketOpen = false;
+      hilog.warn(MUX_LOG_DOMAIN, 'DshMux', '事件流关闭 code=%{public}d reason=%{public}s',
+        value === undefined || value === null ? 0 : value.code,
+        value === undefined || value === null ? '' : String(value.reason));
       this.scheduleReconnect();
     });
     socket.on('error', (err: BusinessError) => {
       this.socketOpen = false;
+      hilog.error(MUX_LOG_DOMAIN, 'DshMux', '事件流错误 %{public}s',
+        err === undefined || err === null ? '' : String(err.message));
       this.scheduleReconnect();
     });
     try {
       socket.connect(this.wsUrl(), options, (err: BusinessError, ok: boolean) => {
         if (!ok && !this.closed) {
+          hilog.error(MUX_LOG_DOMAIN, 'DshMux', '事件流握手失败 %{public}s',
+            err === undefined || err === null ? '' : String(err.message));
           this.scheduleReconnect();
         }
       });
     } catch (e) {
+      hilog.error(MUX_LOG_DOMAIN, 'DshMux', '事件流连接异常 %{public}s', String(e));
       this.scheduleReconnect();
     }
   }
@@ -514,6 +539,7 @@ export class DshApiClient {
       if (error !== undefined && error !== null) {
         reason = String(error['message']);
       }
+      hilog.warn(MUX_LOG_DOMAIN, 'DshMux', '流错误 %{public}s: %{public}s', streamId, reason);
       stream.sink.onEnd(reason);
       this.streams.delete(streamId);
       return;
@@ -546,6 +572,27 @@ export class DshApiClient {
     return streamId;
   }
 
+  /**
+   * 订阅宿主全局事件流（`$events`）：宿主把 `api-session/added|removed|status|activity`
+   * 等 Cordis 事件按原样转发给客户端（与官方 web 端 `ctx.remote.$on` 同一路）。
+   * 侧栏会话列表的「实时出现 / 置顶 / 运行点」就靠这条流，不需要轮询 `session/list`。
+   * @param sink - 接收口（value.type = `ready`（事件源就绪）或 `emit`（一条转发事件））
+   * @returns 逻辑流 id（可用于 closeStream）
+   */
+  openHostEvents(sink: DshStreamSink): string {
+    this.streamSeq++;
+    const streamId: string = 'events-' + this.streamSeq.toString();
+    // `$events` 只接受空 args：sendOpen 会把 stream.args 包成 `payload.args`，
+    // 所以这里给的**就是** args 本体（真机实测：多包一层 `{args:{}}` 会被网关注回
+    // `gateway/arguments-invalid: forwarded Remote event stream requires an empty args object`）。
+    // ArkTS 不接受字面量空对象，所以先声明再传。
+    const args: Record<string, Object> = {};
+    const stream: DshStream = new DshStream(streamId, '$events', args, sink);
+    this.streams.set(streamId, stream);
+    this.sendOpen(stream);
+    return streamId;
+  }
+
   /** 关闭一条逻辑流 */
   closeStream(streamId: string): void {
     if (!this.streams.has(streamId)) {
@@ -573,13 +620,33 @@ export class DshApiClient {
  * DeepSeekClient：内置直连模式（WorkBuddy 式「打开即用」）。
  * 不依赖 dsh 服务端，直接调用 DeepSeek 官方 API（OpenAI 兼容
  * /chat/completions，流式 SSE），与 dsh 模式共享同一套聊天 UI。
- * 参照华为开发者文档《HTTP 数据请求》：on('dataReceive') 流式解析 SSE。
+ *
+ * ⚠️ 必须用 `requestInStream`（不是 `request`）：netstack 的 NAPI 层只在
+ * 「流式请求」下才派发 `dataReceive` / `dataEnd`（实锤在 communication_netstack：
+ * `http_exec.cpp` 的 `OnWritingMemoryBody` 与 `ProcessResponseBodyAndEmitEvents` 都以
+ * `context->IsRequestInStream()` 为前提，`ON_DATA_END` 更是只在
+ * `AsyncWorkRequestInStreamCallback` 里发出；`EnableRequestInStream()` 只由
+ * `http_module.cpp` 的 `requestInStream` 调用）。用 `request()` 的话请求会**成功返回 200**
+ * 但一个字节都不到回调 —— 界面表现就是「发出去没反应、也不报错」。
+ *
+ * 参照华为开发者文档《HTTP 数据请求》：`requestInStream` + on('dataReceive') 流式解析 SSE。
  */
 export class DeepSeekClient {
   /** 官方默认端点（独立模式可在设置里改成任意 OpenAI 兼容端点，如本机 127.0.0.1:11434/v1）。 */
   static readonly API_URL: string = 'https://api.deepseek.com/v1';
+  /**
+   * 日志域（与 `DshMux` 同一个）。hilog 的应用域范围是 [0x0, 0xFFFF]，5 位十六进制的域会被
+   * 静默丢弃 —— 原来写 0xD0042 时真机一条都抓不到，改成 0xD004 后 `hdc shell "hilog | grep DshDirect"` 才有效。
+   */
+  static readonly LOG_DOMAIN: number = 0xD004;
+  /** 原文兜底（非 SSE 端点 / 错误详情）最多攒这么多字符，避免长回复白占内存。 */
+  static readonly RAW_LIMIT: number = 8192;
+  /** 读超时（毫秒）：netstack 把它映射成 curl 的 CURLOPT_TIMEOUT_MS = 整条响应的总时限。 */
+  static readonly READ_TIMEOUT_MS: number = 600000;
   private endpoint: string = DeepSeekClient.API_URL;
   private request: http.HttpRequest | null = null;
+  /** 当前这轮流式的取消钩子（用户点「停止」/ 开新回合时先撤掉上一轮）。 */
+  private cancelHook: (() => void) | null = null;
 
   /** 设置接口地址（空串 / 只给主机时自动补 `/chat/completions`）。 */
   setEndpoint(baseUrl: string): void {
@@ -607,8 +674,13 @@ export class DeepSeekClient {
     return url + '/chat/completions';
   }
 
-  /** 停止当前生成（用户点「停止」） */
+  /** 停止当前生成（用户点「停止」）：按「正常结束」收尾，不把主动中止报成失败。 */
   stop(): void {
+    const cancel: (() => void) | null = this.cancelHook;
+    this.cancelHook = null;
+    if (cancel !== null) {
+      cancel();
+    }
     if (this.request !== null) {
       this.request.destroy();
       this.request = null;
@@ -626,59 +698,115 @@ export class DeepSeekClient {
        onDelta: (text: string) => void,
        onDone: () => void,
        onError: (message: string) => void,
-       systemPrompt: string = ''): void {
+       systemPrompt: string = '',
+       onReasoning: (text: string) => void = (text: string) => {}): void {
     this.stop();
     const req: http.HttpRequest = http.createHttp();
     this.request = req;
     const decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
+    const started: number = Date.now();
     let buffer: string = '';
+    let raw: string = '';
     let finished: boolean = false;
+    let sawDelta: boolean = false;
+    let sawReasoning: boolean = false;
+    let chars: number = 0;
+    let reasoningChars: number = 0;
+
+    /**
+     * 一条思维链增量。DeepSeek 的推理模型（deepseek-v4-flash 等）在 `delta.reasoning_content`
+     * 里先吐完整段思考、再吐 `delta.content`；旧代码只认 content，所以思考期界面上
+     * 一个字都没有（主人说的「思维链滚动不出来 / 没反应」）。
+     */
+    const emitReasoning = (text: string): void => {
+      if (text.length === 0 || finished) {
+        return;
+      }
+      if (!sawReasoning) {
+        hilog.info(DeepSeekClient.LOG_DOMAIN, 'DshDirect', '思维链首块 %{public}dms（%{public}s）', Date.now() - started, model);
+      }
+      sawReasoning = true;
+      reasoningChars += text.length;
+      onReasoning(text);
+    };
+
+    /** 一条正文增量：过滤空块，记下「真的有内容」。 */
+    const emit = (text: string): void => {
+      if (text.length === 0 || finished) {
+        return;
+      }
+      const first: boolean = !sawDelta;
+      sawDelta = true;
+      chars += text.length;
+      if (first) {
+        hilog.info(DeepSeekClient.LOG_DOMAIN, 'DshDirect', '正文首块 %{public}dms（%{public}s）', Date.now() - started, model);
+      }
+      onDelta(text);
+    };
+
+    /**
+     * 收尾（只生效一次）。err 非空 = 失败；flush 为真时先吃下残帧并做非 SSE 兜底，
+     * 真的一个字都没有才算「空回复」（HTTP 200 却没有任何数据块 = 最常见的静默假成功）。
+     */
+    const settle = (err: string, flush: boolean): void => {
+      if (finished) {
+        return;
+      }
+      let message: string = err;
+      if (message.length === 0 && flush) {
+        // 残帧里可能只剩半条思维链/正文，先吃掉再判空
+        emitReasoning(DeepSeekClient.streamReasoning(buffer));
+        emit(DeepSeekClient.streamText(buffer));
+        if (!sawDelta) {
+          const whole: string = DeepSeekClient.completionText(raw);
+          if (whole.length > 0) {
+            emit(whole);
+          } else if (!sawReasoning) {
+            const wholeReasoning: string = DeepSeekClient.completionReasoning(raw);
+            if (wholeReasoning.length > 0) {
+              emitReasoning(wholeReasoning);
+            } else {
+              message = '服务端没有返回任何内容（HTTP 200 但无数据块）';
+            }
+          }
+        }
+      }
+      finished = true;
+      this.cancelHook = null;
+      if (message.length === 0) {
+        hilog.info(DeepSeekClient.LOG_DOMAIN, 'DshDirect',
+          '完成：正文 %{public}d 字 / 思维链 %{public}d 字 / %{public}dms',
+          chars, reasoningChars, Date.now() - started);
+        onDone();
+      } else {
+        hilog.error(DeepSeekClient.LOG_DOMAIN, 'DshDirect', '失败：%{public}s', message);
+        onError(message);
+      }
+    };
+
+    // 取消钩子：本轮流式被打断时按正常结束收尾（已到的文字留在气泡里）
+    this.cancelHook = (): void => {
+      settle('', false);
+    };
 
     req.on('dataReceive', (data: ArrayBuffer) => {
       if (finished) {
         return;
       }
-      buffer += decoder.decodeToString(new Uint8Array(data), { stream: true });
-      let idx: number = buffer.indexOf('\n\n');
-      while (idx !== -1) {
-        const chunk: string = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        const lines: string[] = chunk.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          const line: string = lines[i];
-          if (!line.startsWith('data: ')) {
-            continue;
-          }
-          const dataStr: string = line.slice(6).trim();
-          if (dataStr === '[DONE]') {
-            continue;
-          }
-          try {
-            const json: Record<string, Object> = JSON.parse(dataStr) as Record<string, Object>;
-            const choices: Array<Record<string, Object>> = json['choices'] as Array<Record<string, Object>>;
-            if (choices === undefined || choices === null || choices.length === 0) {
-              continue;
-            }
-            const delta: Record<string, Object> = choices[0]['delta'] as Record<string, Object>;
-            if (delta === undefined || delta === null) {
-              continue;
-            }
-            const content = delta['content'] as Object;
-            if (content !== undefined && content !== null) {
-              onDelta(String(content));
-            }
-          } catch (e) {
-            // 单个坏块不影响整条流
-          }
-        }
-        idx = buffer.indexOf('\n\n');
+      const text: string = decoder.decodeToString(new Uint8Array(data), { stream: true });
+      if (raw.length < DeepSeekClient.RAW_LIMIT) {
+        raw += text;
       }
-    });
-
-    req.on('dataEnd', () => {
-      if (!finished) {
-        finished = true;
-        onDone();
+      buffer += text;
+      // SSE 帧以空行分隔；分块边界可能落在半帧上，所以残帧留在 buffer 里等下一块
+      const end: number = DeepSeekClient.frameBoundary(buffer);
+      if (end > 0) {
+        const frames: string[] = buffer.slice(0, end).split('\n\n');
+        buffer = buffer.slice(end);
+        for (let i = 0; i < frames.length; i++) {
+          emitReasoning(DeepSeekClient.frameReasoning(frames[i]));
+          emit(DeepSeekClient.frameText(frames[i]));
+        }
       }
     });
 
@@ -694,34 +822,154 @@ export class DeepSeekClient {
       'messages': withSystem,
       'stream': true
     };
-    req.request(this.endpoint, {
+    // 注意：流式模式下响应体不走 resp.result（netstack 不落盘），只按 dataReceive 事件下发；
+    // 所以错误详情要靠上面的 raw 自己攒。
+    req.requestInStream(this.endpoint, {
       method: http.RequestMethod.POST,
       header: {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + apiKey
       },
       extraData: JSON.stringify(body),
-      expectDataType: http.HttpDataType.STRING,
       connectTimeout: 10000,
-      readTimeout: 300000
-    }).then((resp: http.HttpResponse) => {
-      if (resp.responseCode !== 200 && !finished) {
-        finished = true;
-        let errText: string = '';
-        try {
-          const result = resp.result as string;
-          if (result !== undefined && result !== null) {
-            errText = result;
-          }
-        } catch (e) {
-        }
-        onError('HTTP ' + resp.responseCode.toString() + (errText.length > 0 ? '：' + errText : ''));
+      readTimeout: DeepSeekClient.READ_TIMEOUT_MS
+    }).then((code: number) => {
+      if (code >= 300) {
+        settle('HTTP ' + code.toString() + (raw.length > 0 ? '：' + raw : ''), false);
+      } else {
+        settle('', true);
       }
     }).catch((e: BusinessError) => {
-      if (!finished) {
-        finished = true;
-        onError('请求失败：' + String(e.message));
-      }
+      settle('请求失败：' + String(e.message), false);
     });
+  }
+
+  /**
+   * `buffer` 里最后一整帧的结束位置（没有完整帧时返回 0）。
+   * 帧与帧之间用空行分隔；分块边界可能把一帧劈成两半，那半帧要留到下一块。
+   */
+  static frameBoundary(buffer: string): number {
+    const at: number = buffer.lastIndexOf('\n\n');
+    // 没有完整帧时 lastIndexOf 是 -1（注意 -1 + 2 = 1，不能直接加完再判 > 0，那会把首字符当帧切出去）
+    return at === -1 ? 0 : at + 2;
+  }
+
+  /**
+   * 把一段原文按 SSE 帧解析成增量文本（= `dataReceive` 里「切帧 + 解析」的纯逻辑版）。
+   * 收尾时用来吃下没有以空行结尾的残帧；`scripts/direct-mode-check.mjs` 也拿它喂真流固件。
+   */
+  static streamText(raw: string): string {
+    let text: string = '';
+    const frames: string[] = raw.split('\n\n');
+    for (let i = 0; i < frames.length; i++) {
+      text += DeepSeekClient.frameText(frames[i]);
+    }
+    return text;
+  }
+
+  /**
+   * 把一段原文里的思维链解析出来（收尾吃残帧用；与 `streamText` 同一套切帧规则）。
+   */
+  static streamReasoning(raw: string): string {
+    let text: string = '';
+    const frames: string[] = raw.split('\n\n');
+    for (let i = 0; i < frames.length; i++) {
+      text += DeepSeekClient.frameReasoning(frames[i]);
+    }
+    return text;
+  }
+
+  /**
+   * 一帧 SSE 里 `delta.reasoning_content` 的增量（推理模型的思维链）。
+   * 非推理模型不吐这个字段 → 返回空串，调用方原样忽略。
+   */
+  static frameReasoning(frame: string): string {
+    return DeepSeekClient.frameField(frame, 'reasoning_content');
+  }
+
+  /**
+   * 一帧 SSE（可能含多行 `data: {...}`）里的增量文本；坏帧/非 data 行一律跳过。
+   * 抽成静态方法是为了让 `scripts/direct-mode-check.mjs` 能直接拿真流固件喂它。
+   */
+  static frameText(frame: string): string {
+    return DeepSeekClient.frameField(frame, 'content');
+  }
+
+  /**
+   * 一帧 SSE 里 `choices[0].delta.<field>` 的增量字符串。
+   * 只认 `data:`（`data: {...}` / `data:{...}` 都收）；以 ':' 开头的 SSE 注释
+   * （DeepSeek 长思考时的 keep-alive 心跳）与别的事件行在这里被跳过。
+   */
+  static frameField(frame: string, field: string): string {
+    let text: string = '';
+    const lines: string[] = frame.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i];
+      if (!line.startsWith('data:')) {
+        continue;
+      }
+      const dataStr: string = line.slice(5).trim();
+      if (dataStr === '[DONE]') {
+        continue;
+      }
+      try {
+        const json: Record<string, Object> = JSON.parse(dataStr) as Record<string, Object>;
+        const choices: Array<Record<string, Object>> = json['choices'] as Array<Record<string, Object>>;
+        if (choices === undefined || choices === null || choices.length === 0) {
+          continue;
+        }
+        const delta: Record<string, Object> = choices[0]['delta'] as Record<string, Object>;
+        if (delta === undefined || delta === null) {
+          continue;
+        }
+        const value: Object = delta[field] as Object;
+        if (value !== undefined && value !== null) {
+          text += String(value);
+        }
+      } catch (e) {
+        // 单行坏帧不影响整条流
+      }
+    }
+    return text;
+  }
+
+  /** 非 SSE 兜底：整段原文其实是普通 `chat.completion` 时取它的思维链。 */
+  static completionReasoning(raw: string): string {
+    return DeepSeekClient.completionField(raw, 'reasoning_content');
+  }
+
+  /** 非 SSE 兜底：整段原文其实就是一条普通 `chat.completion`（端点忽略了 stream:true）。 */
+  static completionText(raw: string): string {
+    return DeepSeekClient.completionField(raw, 'content');
+  }
+
+  /** 非 SSE 兜底里 `choices[0].{message,delta}.<field>` 的整段文本。 */
+  static completionField(raw: string, field: string): string {
+    const start: number = raw.indexOf('{');
+    if (start === -1) {
+      return '';
+    }
+    try {
+      const json: Record<string, Object> = JSON.parse(raw.slice(start)) as Record<string, Object>;
+      const choices: Array<Record<string, Object>> = json['choices'] as Array<Record<string, Object>>;
+      if (choices === undefined || choices === null || choices.length === 0) {
+        return '';
+      }
+      const choice: Record<string, Object> = choices[0];
+      const keys: string[] = ['message', 'delta'];
+      for (let i = 0; i < keys.length; i++) {
+        const block: Record<string, Object> = choice[keys[i]] as Record<string, Object>;
+        if (block === undefined || block === null) {
+          continue;
+        }
+        const value: Object = block[field] as Object;
+        if (value !== undefined && value !== null) {
+          return String(value);
+        }
+      }
+    } catch (e) {
+      // 不是 JSON（多半就是标准 SSE 文本），交给帧解析
+    }
+    return '';
   }
 }

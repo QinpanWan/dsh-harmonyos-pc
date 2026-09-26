@@ -2,6 +2,7 @@
 // execFile so no native addon is ever loaded (HarmonyOS cannot run ELF/.node);
 // injects the DevEco env (NODE_HOME / DEVECO_SDK_HOME / HVIGOR_USER_HOME).
 import { execFile } from "node:child_process";
+import { buildEnv as envForToolchain, resolveToolchain } from "./toolchains.js";
 
 // Tool paths are env-configurable so the plugin is portable across machines:
 // set DEVECO_TOOLS_HOME once to the dir that contains node/hvigor/sdk/ohpm, or
@@ -9,6 +10,8 @@ import { execFile } from "node:child_process";
 const home = process.env.HOME ?? "";
 const toolsHome = process.env.DEVECO_TOOLS_HOME ?? `${home}/deveco/deveco_tools`;
 
+// Legacy API 23 profile (kept as the default export for backwards compatibility).
+// Toolchain-aware callers should resolve a toolchain via ./toolchains.js instead.
 export const TOOLS = {
   nodeHome: process.env.DEVECO_NODE_HOME ?? `${toolsHome}/node`,
   hvigorHome: process.env.DEVECO_HVIGOR_HOME ?? `${toolsHome}/hvigor`,
@@ -22,7 +25,16 @@ const DEFAULT_TIMEOUT_MS = 600_000;
 const TAIL_LINES = 200;
 const MAX_BUFFER = 16 * 1024 * 1024;
 
-function buildEnv() {
+/**
+ * Env for a spawn. Pass `toolchain` (an id like "api26" or a resolved profile from
+ * ./toolchains.js) to inject that toolchain's NODE_HOME / DEVECO_SDK_HOME / PATH;
+ * defaults to the API 23 layout through the legacy TOOLS paths.
+ */
+function buildEnv(toolchain) {
+  if (toolchain) {
+    const resolved = typeof toolchain === "string" ? resolveToolchain(toolchain) : toolchain;
+    return envForToolchain(resolved);
+  }
   const env = { ...process.env };
   env.NODE_HOME = TOOLS.nodeHome;
   env.DEVECO_SDK_HOME = TOOLS.sdkHome;
@@ -35,12 +47,12 @@ function buildEnv() {
  * Run a tool and resolve a normalized result object. Never rejects for a
  * non-zero exit or a timeout; only a catastrophic spawn failure throws.
  */
-export function runCommand(file, args = [], { cwd, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export function runCommand(file, args = [], { cwd, timeoutMs = DEFAULT_TIMEOUT_MS, toolchain } = {}) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     execFile(file, args, {
       cwd,
-      env: buildEnv(),
+      env: buildEnv(toolchain),
       maxBuffer: MAX_BUFFER,
       timeout: timeoutMs,
     }, (error, stdout, stderr) => {

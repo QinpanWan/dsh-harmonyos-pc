@@ -20,7 +20,10 @@ import { DesktopShellContract } from '../desktop/DesktopShellContract';
 import { DesktopPrefs, DesktopPrefKeys } from '../desktop/DesktopPrefs';
 import { DisplayMetrics, WindowGeometry } from '../desktop/WindowGeometry';
 
-const DOMAIN: number = 0x0000;
+// 日志域：hilog 的**应用**域范围是 [0x0, 0xFFFF]（`hilog -h` 的 Domain description），
+// 超出这个范围的域会被静默丢弃（真机实测：原来用 0xD0042 = 852034，`hilog | grep DshEntryAbility`
+// 一条都抓不到）。这里用 0xD004，靠 TAG 区分模块。
+const DOMAIN: number = 0xD004;
 const TAG: string = 'DshEntryAbility';
 
 /** 页面 → Ability：请求确认关闭（页面负责弹确认框） */

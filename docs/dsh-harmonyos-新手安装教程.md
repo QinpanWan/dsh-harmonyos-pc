@@ -19,7 +19,10 @@ dsh-harmonyos-pc 让 DeepSeek Harness（dsh）在鸿蒙设备上完整跑起来�
 ## 2. 前置准备
 
 - 一台 HarmonyOS 设备（本教程基于 arm64 / musl 环境实测）
-- Node.js ≥ 22（推荐 v24，本机路径 `/data/service/hnp/node.org/node_v24.13.0/bin/node`）与 npm
+- Node.js ≥ 22 与 npm；**不用挑版本**——能用 Node 24（最新线）就用 24，本机鸿蒙自带的 v24 起不来时会自动退到 v22：
+  - 鸿蒙自带：`/data/service/hnp/node.org/node_v24.13.0/bin/node`（部分设备上会在 V8 初始化阶段原生崩）
+  - DevEco 自带：`~/deveco/deveco_tools/node/bin/node`（v22.7，稳定兜底）
+  - 脚本怎么挑的见 README「工具链」一节；`sh scripts/dsh-web.sh --print-node` 可查看选了哪个
 - 能访问 `api.deepseek.com`、npm registry 与 GitHub 的网络
 - 一个 DeepSeek API key（必选）；OpenAI key 可选
 - git（可选，用于克隆与更新仓库）
@@ -213,8 +216,12 @@ for _svc in dsh-web; do sh "$HOME/bin/$_svc.sh" >/dev/null 2>&1 & done
 | `scripts/dsh-manual-install.mjs` | 手动直装器：registry 元数据递归解析 + tarball 直装（绕 npm arborist 解析卡死） |
 | `scripts/dsh-update-web.sh` | 设置与更新页（3098，内嵌 HTML） |
 | `scripts/dsh-hm-install.mjs` | GitHub 源插件一键安装（绕过 isogit 拦截） |
+| `scripts/node-runtime.sh` | 公共运行时解析：探测本机所有 node，挑「版本最高、且真能跑起来」的那个（Node 24 优先，22 兜底） |
+| `scripts/dsh-runtime-check.mjs` | 运行时选择回归（22 项，用假 node 把每条分支跑出来） |
 
-所有脚本支持 `NODE_BIN` 环境变量覆盖 node 路径（鸿蒙默认 `/data/service/hnp/node.org/node_v24.13.0/bin/node`）。
+所有脚本**不锁 node 版本**：`scripts/node-runtime.sh` 列出本机能找到的 node，按版本从高到低冒烟试跑，挑第一个真能起来的
+（Node 24 优先，起不来自动退 v22），开关按运行时能力探测；`NODE_BIN` / `DSH_NODE_BIN` 可显式指定、`DSH_NODE_CANDIDATES` 可给候选，
+`sh scripts/dsh-web.sh --print-node` 只看选中哪个。回归：`node scripts/dsh-runtime-check.mjs`。
 
 ## 15. 重要提示
 

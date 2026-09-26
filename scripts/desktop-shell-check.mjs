@@ -201,6 +201,17 @@ for (const file of ['client/entry/src/main/ets/common/Brand.ets', 'client/entry/
   check(`${file} 的填充 Path 都写了 strokeWidth(0)`, bad.length === 0, `行 ${bad.join(', ')}`)
 }
 
+// ——— 独立模式的流式契约（「开箱即用发消息不回复」的根因防线） ———
+// ArkTS 的 @ohos.net.http 只在流式请求下派发 dataReceive/dataEnd：用 request() 会「200 但零回调」，
+// 界面就是「发出去没反应」。这里只留一条守门检查，细节（含真流固件的分块解析）在 direct-mode-check.mjs。
+// 只看 DeepSeekClient 段：同一个文件里的 DshApiClient（服务模式单次 RPC）本来就该用 request()
+const apiSource = read('client/entry/src/main/ets/service/DshApiClient.ets')
+const directSource = apiSource.slice(apiSource.indexOf('export class DeepSeekClient'))
+  .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+check('独立模式直连用 requestInStream（非流式 request 不派发 dataReceive/dataEnd）',
+  directSource.includes('req.requestInStream(') && !/req\.request\(/.test(directSource),
+  '细节见 node scripts/direct-mode-check.mjs')
+
 // ——— 输出 ———
 console.log('桌面壳契约一致性检查')
 console.log(`契约：${contractPath}`)

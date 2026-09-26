@@ -4,11 +4,15 @@
 // getCatalogTree / getDocumentById / getNavigationAddress），与官方「鸿蒙开发者知识
 // MCP 服务」searchDocuments 同源语义：实时同步 开发指南/API参考/版本说明/最佳实践/FAQ。
 //
-// 工具（随 agent 创建注册，web 与 headless profile 均可用）：
+// 工具（宿主平面「全局注册」，web 与 headless profile 均可用）：
 //   huawei_devdocs_search  关键词检索官方目录（标题/章节路径），返回官方 URL
 //   huawei_devdocs_get     按官方 URL 读取单篇文档全文（可分页）
 //   huawei_devdocs_catalog 浏览某分类顶层章节
 //   huawei_devdocs_status  后端连通性 / 索引缓存 / 强制规则状态诊断
+// 工具注册走 ctx.tools 全局注册（与 dsh-huawei-local-llm / dsh-self-evolve 同款）：
+// dsh 0.1.6-alpha.1 起，经 cordis.patch.yml insert 挂到宿主平面的插件收不到
+// agent/created（agent 作用域事件），旧的「每 agent 创建时注册」会静默失效、
+// 四个工具从模型工具表整批消失（日志仍打印「已加载」）。那段 per-agent 代码现仅作回退。
 //
 // 强制机制（agent/pre-step，参照 dsh-prompt-antivirus 的守卫注入模式）：
 //   检测到鸿蒙开发意图（用户消息含 鸿蒙/harmonyos/arkts/arkui/hvigor/ohpm/.ets/
@@ -405,86 +409,109 @@ export function apply(ctx, config = {}) {
     return () => disposer();
   }, "huawei-devdocs: hooks");
 
-  // 每 agent 注册检索工具（web 与 headless 的 agent 均覆盖）。
+  // 四个检索工具的声明（web 与 headless 的 agent 均覆盖）：定义按需构建，注册走两条路径。
+  //
+  // ① 主路径 = 宿主平面「全局注册」（下方 global tools）。
+  //    dsh 0.1.6-alpha.1 起，经 cordis.patch.yml 的 insert 挂到宿主平面的插件不再收到
+  //    agent 作用域事件（agent/created 不派发到这里），旧的 per-agent 注册会静默失效 →
+  //    四个工具从模型工具表里整批消失（实测 request/header.tools 自 2026-09-16 起无
+  //    huawei_devdocs_*，而同为 insert 但走全局注册的 huawei_local_llm 仍在）。
+  //    全局注册与 dsh-huawei-local-llm / dsh-self-evolve 同款：tools 注册表会自动把它
+  //    送进每个 agent（tools.view 按层合并，不需要我们自己遍历 agent）。
+  // ② 回退 = per-agent 注册，供仍向宿主平面派发 agent/created 的部署；同名声明的
+  //    scoped 层只是遮蔽全局层，不会冲突。
+  const createToolDefinitions = () => [
+        defineTool({
+          name: "huawei_devdocs_search",
+          description:
+            "检索华为开发者官方文档（HarmonyOS/鸿蒙）：覆盖 开发指南、API参考、版本说明、最佳实践、FAQ，"
+            + "索引实时同步自官方文档门户。关键词支持中文与英文（如 ArkUI、TextPicker、@kit.AbilityKit、module.json5 配置）。"
+            + "鸿蒙开发问题的强制前置步骤：先调用本工具检索，再用 huawei_devdocs_get 读取命中页面后作答。",
+          parameters: {
+            query: { type: "string", required: true, description: "检索关键词，例如 ArkUI 布局 / TextPicker / 应用权限申请。" },
+            catalog: { type: "string", description: "限定分类: harmonyos-guides(开发指南) | harmonyos-references(API参考) | harmonyos-releases(版本说明) | best-practices(最佳实践) | harmonyos-faqs(FAQ)；省略则全部分类。" },
+            limit: { type: "integer", description: "返回条数 1~50，默认 20。" },
+          },
+          output: { schema: SEARCH_OUTPUT_SCHEMA, render: renderSearch },
+          isConcurrencySafe: () => true,
+          timeoutMs: cfg.toolTimeoutMs,
+          async execute(args, exec) {
+            return buildSearchHandler(cfg)(args, exec);
+          },
+        }),
+        defineTool({
+          name: "huawei_devdocs_get",
+          description:
+            "读取华为开发者官方文档单篇全文（按 huawei_devdocs_search 返回的 URL）。"
+            + "返回正文纯文本（默认前 15000 字符，长文档用 start 参数翻页）。",
+          parameters: {
+            url: { type: "string", required: true, description: "官方文档 URL，形如 https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/<slug>。" },
+            start: { type: "integer", description: "正文起始偏移（字符数），用于读取被截断的后续内容，默认 0。" },
+            maxChars: { type: "integer", description: "本次最多返回字符数，默认 15000，上限 60000。" },
+          },
+          output: { schema: GET_OUTPUT_SCHEMA, render: renderGet },
+          isConcurrencySafe: () => true,
+          timeoutMs: cfg.toolTimeoutMs,
+          async execute(args, exec) {
+            return buildGetHandler(cfg)(args, exec);
+          },
+        }),
+        defineTool({
+          name: "huawei_devdocs_catalog",
+          description: "浏览华为开发者官方文档某分类的顶层章节（含每章文档数），便于不熟悉关键词时定位文档。",
+          parameters: {
+            catalog: { type: "string", required: true, description: "分类 id: harmonyos-guides / harmonyos-references / harmonyos-releases / best-practices / harmonyos-faqs。" },
+            limit: { type: "integer", description: "最多返回章节数，默认 60。" },
+          },
+          output: { schema: CATALOG_OUTPUT_SCHEMA, render: renderCatalog },
+          isConcurrencySafe: () => true,
+          timeoutMs: cfg.toolTimeoutMs,
+          async execute(args, exec) {
+            return buildCatalogHandler(cfg)(args, exec);
+          },
+        }),
+        defineTool({
+          name: "huawei_devdocs_status",
+          description: "诊断华为开发者文档插件：官方门户连通性、各分类索引缓存状态、强制规则开关与注入次数。工具异常时先调用它。",
+          parameters: {},
+          output: { schema: STATUS_OUTPUT_SCHEMA, render: renderStatus },
+          isConcurrencySafe: () => true,
+          timeoutMs: cfg.toolTimeoutMs,
+          async execute(args, exec) {
+            return buildStatusHandler(cfg)(args, exec);
+          },
+        }),
+  ];
+
+  /** 把四个工具注册进给定 tools 服务，返回卸载函数。 */
+  const registerTools = (tools) => {
+    const disposers = createToolDefinitions().map((definition) => tools.register(definition));
+    return () => {
+      for (const dispose of disposers) dispose();
+    };
+  };
+
+  // ① 宿主平面全局注册（主路径）。
+  ctx.effect(() => {
+    if (ctx.tools == null || typeof ctx.tools.register !== "function") {
+      console.error("[huawei-devdocs] 未取到 tools 服务，检索工具未注册（inject 需含 \"tools\"）");
+      return;
+    }
+    const dispose = registerTools(ctx.tools);
+    console.error("[huawei-devdocs] 已全局注册 4 个工具: huawei_devdocs_search/get/catalog/status");
+    return dispose;
+  }, "huawei-devdocs: global tools");
+
+  // ② per-agent 回退注册。
   ctx.effect(() => {
     const stopCreated = ctx.on("agent/created", ({ agent }) => {
       if (!agent?.ctx) return;
       return agent.ctx.effect(() => {
         const tools = agent.ctx.get("tools");
         if (!tools) return;
-        const disposers = [
-          tools.register(
-            defineTool({
-              name: "huawei_devdocs_search",
-              description:
-                "检索华为开发者官方文档（HarmonyOS/鸿蒙）：覆盖 开发指南、API参考、版本说明、最佳实践、FAQ，"
-                + "索引实时同步自官方文档门户。关键词支持中文与英文（如 ArkUI、TextPicker、@kit.AbilityKit、module.json5 配置）。"
-                + "鸿蒙开发问题的强制前置步骤：先调用本工具检索，再用 huawei_devdocs_get 读取命中页面后作答。",
-              parameters: {
-                query: { type: "string", required: true, description: "检索关键词，例如 ArkUI 布局 / TextPicker / 应用权限申请。" },
-                catalog: { type: "string", description: "限定分类: harmonyos-guides(开发指南) | harmonyos-references(API参考) | harmonyos-releases(版本说明) | best-practices(最佳实践) | harmonyos-faqs(FAQ)；省略则全部分类。" },
-                limit: { type: "integer", description: "返回条数 1~50，默认 20。" },
-              },
-              output: { schema: SEARCH_OUTPUT_SCHEMA, render: renderSearch },
-              isConcurrencySafe: () => true,
-              timeoutMs: cfg.toolTimeoutMs,
-              async execute(args, exec) {
-                return buildSearchHandler(cfg)(args, exec);
-              },
-            }),
-          ),
-          tools.register(
-            defineTool({
-              name: "huawei_devdocs_get",
-              description:
-                "读取华为开发者官方文档单篇全文（按 huawei_devdocs_search 返回的 URL）。"
-                + "返回正文纯文本（默认前 15000 字符，长文档用 start 参数翻页）。",
-              parameters: {
-                url: { type: "string", required: true, description: "官方文档 URL，形如 https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/<slug>。" },
-                start: { type: "integer", description: "正文起始偏移（字符数），用于读取被截断的后续内容，默认 0。" },
-                maxChars: { type: "integer", description: "本次最多返回字符数，默认 15000，上限 60000。" },
-              },
-              output: { schema: GET_OUTPUT_SCHEMA, render: renderGet },
-              isConcurrencySafe: () => true,
-              timeoutMs: cfg.toolTimeoutMs,
-              async execute(args, exec) {
-                return buildGetHandler(cfg)(args, exec);
-              },
-            }),
-          ),
-          tools.register(
-            defineTool({
-              name: "huawei_devdocs_catalog",
-              description: "浏览华为开发者官方文档某分类的顶层章节（含每章文档数），便于不熟悉关键词时定位文档。",
-              parameters: {
-                catalog: { type: "string", required: true, description: "分类 id: harmonyos-guides / harmonyos-references / harmonyos-releases / best-practices / harmonyos-faqs。" },
-                limit: { type: "integer", description: "最多返回章节数，默认 60。" },
-              },
-              output: { schema: CATALOG_OUTPUT_SCHEMA, render: renderCatalog },
-              isConcurrencySafe: () => true,
-              timeoutMs: cfg.toolTimeoutMs,
-              async execute(args, exec) {
-                return buildCatalogHandler(cfg)(args, exec);
-              },
-            }),
-          ),
-          tools.register(
-            defineTool({
-              name: "huawei_devdocs_status",
-              description: "诊断华为开发者文档插件：官方门户连通性、各分类索引缓存状态、强制规则开关与注入次数。工具异常时先调用它。",
-              parameters: {},
-              output: { schema: STATUS_OUTPUT_SCHEMA, render: renderStatus },
-              isConcurrencySafe: () => true,
-              timeoutMs: cfg.toolTimeoutMs,
-              async execute(args, exec) {
-                return buildStatusHandler(cfg)(args, exec);
-              },
-            }),
-          ),
-        ];
-        return () => {
-          for (const dispose of disposers) dispose();
-        };
+        const dispose = registerTools(tools);
+        console.error("[huawei-devdocs] agent/created: 已为该 agent 注册 4 个工具（作用域层）");
+        return dispose;
       }, "huawei-devdocs: tools");
     });
     return () => stopCreated();

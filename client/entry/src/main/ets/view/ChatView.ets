@@ -16,7 +16,7 @@ import { FishMark } from '../common/Brand';
 import { ChatMessage } from '../model/Types';
 import { MessageItem } from './MessageItem';
 import { InputBar } from './InputBar';
-import { IconChevronRightOutline, IconShareOutline } from '../common/Icons';
+import { IconChevronDownOutline, IconChevronRightOutline, IconShareOutline } from '../common/Icons';
 
 @Component
 export struct ChatView {
@@ -52,7 +52,13 @@ export struct ChatView {
   @Prop modelKey: string = '';
   /** 卡下方的提示（独立模式没填 API Key 之类），空串则不显示 */
   @Prop hint: string = '';
+  /** 正文列表的滚动控制器（由页面持有：切会话/增量都要它滚到底） */
   scroller: Scroller = new Scroller();
+  /** 正文是否停在底部（页面用它决定要不要继续跟随；读者上翻后就不抢滚动） */
+  onFollowState: (atEnd: boolean) => void = (atEnd: boolean) => {};
+  @State atEnd: boolean = true;
+  /** 「回到底部」浮标悬停态（上游 .toBottom:hover） */
+  @State toBottomHover: boolean = false;
   onSend: (text: string) => void = (text: string) => {};
   onStop: () => void = () => {};
   onPickModel: (key: string) => void = (key: string) => {};
@@ -91,7 +97,15 @@ export struct ChatView {
         .justifyContent(FlexAlign.Center)
         .padding({ bottom: 32 })
       } else {
-        this.transcript()
+        // 正文与「回到底部」浮标同处一层：读者上翻时按钮才出现（上游 ChatView .toBottomSlot）
+        Stack({ alignContent: Alignment.BottomEnd }) {
+          this.transcript()
+          if (!this.atEnd) {
+            this.toBottom()
+          }
+        }
+        .width('100%')
+        .layoutWeight(1)
         this.composer(false)
       }
     }
@@ -295,11 +309,66 @@ export struct ChatView {
       }, (msg: ChatMessage) => msg.id)
     }
     .width('100%')
-    .layoutWeight(1)
+    .height('100%')
     .padding({ left: Theme.COMPOSER_SIDE_CLEARANCE + 16, right: Theme.COMPOSER_SIDE_CLEARANCE + 16, top: 16, bottom: 16 })
     .scrollBar(BarState.Auto)
     .edgeEffect(EdgeEffect.Spring)
     .alignListItem(ListItemAlign.Center)
+    .onDidScroll(() => {
+      this.syncAtEnd();
+    })
+  }
+
+  /**
+   * 同步「是否停在底部」给页面。用 Scroller.isAtEnd() 而不是索引比较：
+   * 流式正文的高度一直在长，索引法会把「内容变高」误判成「读者上翻」。
+   */
+  private syncAtEnd(): void {
+    let atEnd: boolean = true;
+    try {
+      atEnd = this.scroller.isAtEnd();
+    } catch (e) {
+      atEnd = true; // 控制器还没绑定（首帧/hero 相位）
+    }
+    this.atEnd = atEnd;
+    this.onFollowState(atEnd);
+  }
+
+  /** 回到底部（上游 .toBottom：34x34 圆、floating 填充、悬停下沉一档）。 */
+  @Builder
+  toBottom() {
+    Row() {
+      IconChevronDownOutline({ size: 16, color: Theme.palette(this.dark).dswAliasLabelPrimary })
+    }
+    .width(Theme.TO_BOTTOM_SIZE)
+    .height(Theme.TO_BOTTOM_SIZE)
+    .justifyContent(FlexAlign.Center)
+    .borderRadius(Theme.TO_BOTTOM_SIZE / 2)
+    .backgroundColor(this.toBottomHover
+      ? Theme.palette(this.dark).dswAliasButtonFloatingHover
+      : Theme.palette(this.dark).dswAliasButtonFloatingFill)
+    .border({ width: 0.5, color: Theme.palette(this.dark).dswAliasBorderL3 })
+    .margin({ right: this.toBottomInset(), bottom: 10 })
+    .accessibilityText('回到底部') // 上游 .toBottom 的 aria-label（chat.toBottom）
+    .onHover((isHover: boolean) => {
+      this.toBottomHover = isHover;
+    })
+    .onClick(() => {
+      try {
+        this.scroller.scrollEdge(Edge.Bottom);
+      } catch (e) {
+        // 未绑定控制器：列表本就在底部
+      }
+      this.atEnd = true;
+      this.onFollowState(true);
+    })
+  }
+
+  /** 浮标右内边距：与正文列右缘对齐（上游 .toBottomSlot 的 padding-right 算式）。 */
+  private toBottomInset(): number {
+    const clearance: number = Theme.COMPOSER_SIDE_CLEARANCE + 16;
+    const spare: number = Math.max(0, (this.columnWidth - this.contentWidth()) / 2);
+    return spare + clearance;
   }
 
   private placeholder(): string {

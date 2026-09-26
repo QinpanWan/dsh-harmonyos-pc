@@ -17,7 +17,9 @@ const REPO = join(HERE, '..');
 const HOME = homedir();
 const OWNER = 'QinpanWan';
 const REPO_NAME = 'dsh-harmonyos-pc';
-const NODE = process.env.NODE_BIN || '/data/service/hnp/node.org/node_v24.13.0/bin/node';
+// 子进程用哪个 node：显式 NODE_BIN > 当前正在跑这个脚本的 node（process.execPath）。
+// 不写死版本 —— 能跑得起来的就是对的（鸿蒙上 hnp v24 偶发起不来时会退到 deveco v22，见 node-runtime.sh）。
+const NODE = process.env.NODE_BIN || process.execPath;
 const UA = 'dsh-hm-update/0.1';
 
 const PRESET_DIR = join(HOME, '.dsh', '.agent-presets');

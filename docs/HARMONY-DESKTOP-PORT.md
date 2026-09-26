@@ -38,10 +38,18 @@
 
 - `client/entry/src/main/resources/rawfile/desktop-shell.json`：上游仓库/提交/版本、窗口几何、更新调度与 feed 布局、菜单树、快捷键表。
 - `client/entry/src/main/ets/desktop/DesktopShellContract.ets`：运行时读取该 JSON（读取失败回落内置默认值并记录原因，**不静默降级到 0 值**）。
-- `scripts/desktop-shell-check.mjs`：用 Node 把三方对起来 —— ①契约 ②上游源码快照（正则抠常量）③ArkTS 实现（文案表字段、标签解析 case、菜单分发分支、**窗口几何单位：`resize/moveWindowTo` 必须过 `pxFromVp()`、落盘必须带 `v` 版本号、px/vp 换算只许出现在 `WindowGeometry` 内**），任何一处漂移即失败。当前 29 项全绿。
+- `scripts/desktop-shell-check.mjs`：用 Node 把三方对起来 —— ①契约 ②上游源码快照（正则抠常量）③ArkTS 实现（文案表字段、标签解析 case、菜单分发分支、**窗口几何单位：`resize/moveWindowTo` 必须过 `pxFromVp()`、落盘必须带 `v` 版本号、px/vp 换算只许出现在 `WindowGeometry` 内**、字形 `Path` 必须显式 `strokeWidth`、独立模式必须走 `requestInStream`），任何一处漂移即失败。当前 33 项全绿。
+- `scripts/direct-mode-check.mjs`：独立模式（内置直连，开箱即用）的静态契约 + 真解析器功能回归 —— 把 `.ets` 里的
+  `frameBoundary/frameText/streamText/completionText` 抠出来在 node 里跑（`--experimental-strip-types` 剥类型），
+  喂官方 API 抓下来的真实 SSE 固件，按任意字节边界切块。当前 32 项全绿。
+- `scripts/session-live-check.mjs`：侧栏实时化（`$events` 事件流 → 就地 upsert/remove/status/activity）与思维链
+  （`blocksToReasoning` / reasoning-delta / `assistant/message` 的 reasoning 块 / 摘要取行规则）的静态契约 + 功能回归 ——
+  同样抠 `.ets` **真函数**在 node 里跑，喂**真 dsh 服务抓包的固件**。当前 50 项全绿。
 
 ```sh
 node scripts/desktop-shell-check.mjs
+node scripts/direct-mode-check.mjs
+node scripts/session-live-check.mjs
 ```
 
 ## UI 复刻：令牌与图标都是「生成物」，不是手写物
@@ -126,6 +134,29 @@ hero 相位的 `heroWorkspaceRow` 已删除（详见下面《输入行四枚胶�
   内置永远可用，连上服务端后用 `agentPresets/list` 覆盖，并用服务端 name 补上中文名缺失的那些。
 - 文案统一为「独立模式（内置，开箱即用）」/「dsh 服务模式」（设置面板的 Select 与说明行）。
 
+### 独立模式必须用 `requestInStream`（别用 `request`，否则「200 但零回调」）
+
+主人报「开箱即用的模式发消息不回复，配好密钥也这样」——不是密钥/模型/网络问题，是 `@ohos.net.http` 的**派发条件**：
+
+- **只有流式请求才有流式事件**：`communication_netstack` 里 `HttpExec::OnWritingMemoryBody`（`http_exec.cpp`）
+  与 `ProcessResponseBodyAndEmitEvents` 都以 `context->IsRequestInStream()` 为前提才 `SetTempData` + 投递
+  `OnDataReceive`；`ON_DATA_END` 只在 `AsyncWorkRequestInStreamCallback` 里发出；`EnableRequestInStream()`
+  只被 `http_module.cpp` 的 `requestInStream` 调用。⇒ 用 `request()` 发 SSE 会拿到 **HTTP 200 和完整
+  `resp.result`，但 `on('dataReceive')` / `on('dataEnd')` 一次都不响**；旧代码只在非 200 时报错，于是
+  既不显示内容也不报错，看起来就是「发出去没反应」。
+- **现在的形状**（`service/DshApiClient.ets` → `DeepSeekClient.chat()`）：`requestInStream` 的 promise 只用来拿
+  **响应码**，正文只走 `dataReceive`；收尾是唯一的 `settle(err, flush)`（`finished` 闸门保证只生效一次）；
+  用户点「停止」/ 开新回合走 `cancelHook` 按**正常结束**收尾；非 2xx 用自己攒的 `raw` 报错（流式模式没有
+  `resp.result`）；**HTTP 200 但零数据块 → 明确报「服务端没有返回任何内容」**；非 SSE 端点（忽略 `stream:true`）
+  走 `completionText` 兜底；`readTimeout` 600s（netstack 映射成 curl `CURLOPT_TIMEOUT_MS` = 整条响应总时限）。
+- **解析器是静态可测的**：`frameBoundary()`（最后一整帧的结束位置，注意 `lastIndexOf` 返回 -1 时 `-1+2=1` 这种坑）、
+  `frameText()`（一帧里的 `delta.content`，`data:` 带不带空格都认，多行 `data:` 按 SSE 规范拼接，注释帧与 `[DONE]` 跳过）、
+  `streamText()`（整段原文 → 增量文本，收尾残帧用）、`completionText()`（非 SSE 整段 JSON 兜底）。
+- **回归检查**：`node scripts/direct-mode-check.mjs`（32 项：静态契约 + 把上面这些**真函数**抠出来在 node 里跑
+  **官方 API 抓下来的真流固件**，按 1–999 字节任意切块、keep-alive、`[DONE]`、残帧、非 SSE 兜底）。
+  它当场抓到过一个「`-1+2=1` 把首字符当帧切掉」的边界错。`desktop-shell-check.mjs` 里也有 1 项守门（33/33）。
+- **真机排查**：日志标签 `DshDirect`（首块到达 / 完成字数与耗时 / 失败原因），`hdc shell hilog -T DshDirect`。
+
 ### 输入行四枚胶囊（工作区 / 工作区权限 / 对话模式并排）
 
 上游把「工作区」「对话模式」放在 hero 相位输入卡**上方**的 `heroWorkspaceRow`，与卡内的「工作区权限」分处两行；
@@ -145,6 +176,159 @@ hero 相位的 `heroWorkspaceRow` 已删除（详见下面《输入行四枚胶�
   `projections.values.modelSelection.{lastUsed,next}` 回填当前模型 —— `modelLabel()` 不再拿预设名冒充模型。
 - 胶囊不可用时（独立模式 / 未连接 / 还没有会话）统一「**置灰 + 菜单首行写原因 + 末行留切换入口**」，不隐藏、不留死路。
 
+### 侧栏实时化（`$events` 事件流）与思维链 / 跟随滚动
+
+主人报「没有实时显示和滚动思维链，左侧没实时刷新出最新会话」。侧栏和思维链各是一个真 bug。
+
+**侧栏＝宿主 `$events` 逻辑流**（会话列表的真源，别再轮询 `session/list`）：
+
+- 宿主 `dsh-api-session-controller/lib/index.js` 把 `ctx.on('session/created'|'session/disposed'|'agent/status'|'session/event')`
+  映成 `ctx.emit('api-session/added', summary)` / `('api-session/removed', sessionId)` / `('api-session/status', agentId, running)` /
+  `('api-session/activity', sessionId, event.time)`；`dsh-api-remotes/lib/index.js` 的 `API_REMOTE_FORWARDED_EVENTS`
+  白名单把它们交给网关的内建逻辑流转发到客户端 —— 官方 web 端 `dsh-client-ui-session` 的 `apply()` 用的
+  `ctx.remote.$on(...)` 就是这条路。
+- 端点常量 `REMOTE_EVENT_STREAM_ENDPOINT = '$events'`，**payload 必须是空 `args: {}`**（网关侧校验）。
+  下行帧两种：`{"type":"item","streamId":…,"value":{"type":"ready","clientId":…,"host":{"home":…}}}`（事件源就绪）与
+  `{"type":"item","streamId":…,"value":{"type":"emit","event":"api-session/added","args":[summary]}}`（业务）。
+- 客户端：`DshApiClient.openHostEvents(sink)`（`streamId = 'events-N'`）→ `Index.openHostEvents()` 在 `connect()` 的
+  `openMux` 成功回调与 `.then()` 里都补开一次（重连后由 `reopenStreams()` 原样重开）→ `Index.onHostEvent()`
+  分派 `upsertSession()` / `removeSession()` / `markSessionRunning()` / `touchSession()`。
+- **事件载荷与 `session/list` 的行同源**，所以 `parseSessionSummary()` 两边共用，行内字段够用 —— 事件到达时就地改列表，
+  不重拉全表（`session/list` 实测 286 行 / ~188KB / ~1s）。只有本地查不到那一行时才 `scheduleSessionRefresh(200|800)`
+  去抖兜底一次全量，外面套 `sessionRefreshInFlight` 并发闸门（飞行中来的挂起，落地后 200ms 补一次）。
+- 列表排序统一走 `sortSessions()`（`updatedAt` 降序，与 `session/list` 的返回顺序一致）：新会话、别处发的消息都自然置顶。
+
+**思维链（CoT）两个来源都要认**：
+
+- 实时：`assistant-stream` 帧 `start` → `chunk{block-start|reasoning-delta|text-delta|block-end|usage|finish}` → `end`（`outcome.kind:'committed'`，实测一次回答约 200 帧）。
+- 快照：落库的 `assistant/message` → `data.message.content[]` 里的 `{"type":"reasoning","text":…}`（切会话/重连只有这一份）。
+- 旧缺陷：`blocksToText()` 只认 `text` 块（切会话即丢思维链）、`MessageItem` 只在「有 reasoning 且无 text」时印一行「思考中」（从不渲染内容）。
+  现在 `blocksToReasoning()` 负责收集，`assistant/message` 分支回填 `msg.reasoning`，`applyAssistantFrame` 支持多段
+  `block-start`（第 2 段起 `\n\n` 接上；单条 `block-start` 不造空气泡）。
+
+**披露行与滚动**：
+
+- `view/MessageItem.ets` 的 `reasoningRow()` 对齐上游 `packages/client/ui-chat/src/client/chat/ReasoningRow`：
+  图标 + 标题（生成中「思考中」/ 结束「思考」）+ 一行摘要 + 展开/收起 chevron；摘要生成中取**最后一行**（实时尾巴）、
+  结束取**首行**，去 `**` 并限长 160。上游的折叠与悬浮钉住**有意未做**。
+- `scrollToBottom(force)` 的跟随闸门 `followBottom`：读者上翻后不再抢滚动，发消息/切会话 `force=true` 重新跟随。
+  `ChatView.onDidScroll` → `syncAtEnd()` 用 `Scroller.isAtEnd()` 回报（索引法会被流式正文高度增长误判），
+  非底部时显示 34 圆「回到底部」浮标（上游 `.toBottom`，`accessibilityText('回到底部')` = 上游 `aria-label`）。
+- **回归检查**：`node scripts/session-live-check.mjs`（50 项）= 静态契约 + 抠出 `.ets` 真函数在 node 里跑真服务抓包固件。
+
+### 侧栏实时化的真机分水岭：`$events` 握手的 `supportOriginPort` 与「行键不重绘」
+
+上面的 `$events` 逻辑流在**真机上一次都没生效**。本机就是那台鸿蒙 PC（`hdc list targets` = `127.0.0.1:32905`），
+在设备上对着本机 dsh（`127.0.0.1:3080`）排查，两个真因：
+
+**① 握手 `Origin` 少端口 → Host/Origin 栅栏 403**。ArkTS `@ohos.web.webSocket` 建连默认
+`Origin = address`（只有 host）；dsh 网关要求 Origin 的 authority 与 Host **含端口**一致，
+`Origin: http://127.0.0.1` vs `Host: 127.0.0.1:3080` 判不等 ⇒ 403，事件流根本没建立。
+修法（`service/DshApiClient.ets` `openHostEvents()`）：
+
+```ts
+// API 26 起：打开后 Origin 才带 host:port，否则被 dsh 的 Host/Origin 栅栏 403
+const options: webSocket.WebSocketRequestOptions = { header: header, supportOriginPort: true };
+```
+
+定位手法值得复用：先起一个**本地假网关**回显握手头（`ws-probe-server.mjs`），直接看出 `Origin` 里没有端口；
+再用 `mux-origin-probe.mjs` 对真 dsh 复现 403；最后 `mux-events-probe.mjs` 验证修好后能收到 `ready` + `emit` 帧。
+
+**② 侧栏行键不重绘（`ForEach` 只按 key 判等的第二个病例）**。`view/Sidebar.ets` 的行键原先只有 `sessionId`：
+新会话插得进来，但「标题/时间/运行位/选中态」这四种**原地变化**不改键 ⇒ ArkUI 复用旧行，列表看起来「有条目但不更新」。
+修法：`rowKey(item, currentSessionId)` 把 `sessionId | title | updatedAt | running | 是否选中` 全编进键
+（一次事件只重建一行）。**规律**：凡是「同一行内容会原地变」的 `ForEach`，键必须包含会变的那部分 ——
+正文气泡看文本长度（第五轮）、侧栏行看标题/时间/运行位（本轮）。
+
+**真机验收（dsh 服务模式）**：命令行 `session/create` → 约 2 秒内侧栏顶部自动出现该行；`session/prompt` 跑起来后
+标题/时间行内实时刷新、页签名同步、思考行跟着流式增长、正文自动跟随；`uitest uiInput fling` 上翻后右下出现 34 圆
+「回到底部」浮标（px `[2451,1575][2516,1640]`），点它回到底部。装机走
+`~/bin/hm-sign-install.sh`（xiaobai 调试证书本地签名）+ `hdc install -r` + `aa start -b com.dsh.harmonyos.client -a EntryAbility`。
+
+### 真机首测抓到的两个 bug：`ForEach` 键 与 独立模式 `reasoning_content`
+
+2026-09-26 第五轮把改动**装到设备上跑**（本机即那台鸿蒙 PC：`hdc list targets` = `127.0.0.1:32905`），当场上轮「逻辑上没问题」的两处就露了馅：
+
+**① 流式正文一个增量都不重绘 —— `ForEach` 只按 key 判等**
+
+```ts
+// 坏（旧）：键里没有内容 → 键不变 → ArkUI 认为还是同一个 item，不重绘
+}, (block: TextBlock, index: number) => this.message.id + '-' + index.toString())
+
+// 好（新，view/MessageItem.ets 的 blockKey）：把 isCode 与文本长度编进键，每个增量换一次键
+private blockKey(block: TextBlock, index: number): string {
+  return this.message.id + '-' + index.toString()
+    + (block.isCode ? '-c-' : '-t-') + block.text.length.toString();
+}
+```
+
+助手气泡的生命周期是「先 push 一条空消息 → 增量往 `text` 里追加」，所以键不变 = 气泡永远空着（`reasoning` 非空时上面那行字还在，看起来像「卡住」而不是「没反应」）。
+**规律**：ArkUI 的 `ForEach`（以及 `LazyForEach`）**不比较 item 内容**，只比 key；凡是「内容原地增长」的列表，key 必须包含会变的那部分（长度/序号/版本号）。
+
+**② 独立模式（直连 `api.deepseek.com`）整条思维链丢掉 —— 字段名不同**
+
+推理模型把思维链放在 `choices[0].delta.reasoning_content`（不是 `content`）。旧解析器只认 `delta.content`，
+于是整个思考阶段界面只有一行「思考中」、一个字都不涨 = 主人说的「思维链滚动不出来」。
+新增（`service/DshApiClient.ets`，纯静态函数、可直接喂固件）：
+
+| 函数 | 取什么 | 用途 |
+| --- | --- | --- |
+| `frameField(frame, field)` | 一帧 SSE 的 `choices[0].delta.<field>` | 唯一的 JSON 解析点 |
+| `frameText` / `frameReasoning` | `content` / `reasoning_content` | `dataReceive` 里逐帧取增量 |
+| `streamText` / `streamReasoning` | 整段原文（含残帧） | `dataEnd`/`settle` 收尾兜底 |
+| `completionText` / `completionReasoning` | `choices[0].{message,delta}.<field>` | 端点忽略 `stream:true` 时的整段 JSON 兜底 |
+
+`Index.ets` 直连回合把 reasoning 增量写进助手消息的 `reasoning` → 披露行（`reasoningRow()`）在独立模式下也有实时的 CoT 可显示。
+
+**③ 附带：应用日志改公共域**。`EntryAbility.ets` 的 `DOMAIN` 由 `0x0000` 改成 `0xD0042`——
+`0x00000–0x0FFFF` 是系统私有域，普通 `hdc shell hilog` 读不到（本轮前半段抓了 12743 行日志，零条应用日志）。
+改到公共域后，真机排障 `hdc shell hilog -T DshDirect` 就能看到直连模式的首块/完成字数/失败原因。
+
+**真机实测结论**（02:43 截图）：探针包自动发一条，界面同时出现用户气泡 + 思维链行（实时摘要）+ 助手回答；
+随后去探针重打干净包、`hap-sign-tool` 签名并 `hdc install`，应用正常启动。
+
+### 独立模式「发消息不在左侧生成会话」：切模式带过来的悬挂会话 id（2026-09-26 第七轮）
+
+主人报「发送消息之后不生成新会话在左侧 —— 这个问题是独立模式下的」。真机复现（本机即那台鸿蒙 PC）：
+**先在 dsh 服务模式里点过「新会话」或选过一条空会话，再切回独立模式发消息** —— 正文 / 思维链 / 回答都正常流式出来，
+只有左侧栏一直挂着「还没有会话」。
+
+**根因（`Index.ets` 的 `sendDirect()`）**：判断「要不要就地建一条本机会话」用的是 `currentSessionId.length === 0`。
+从 dsh 服务模式切回来时 `currentSessionId` 还停在服务端的会话 id 上（**非空**，但 `directConversations` 里根本没有这一行），
+于是 `beginDirectConversation()` 被跳过，侧栏那份投影（`publishDirectSessions()`）自然一条行都没有。
+判据要问「这条 id 在不在本机会话清单里」：
+
+```ts
+// 好（新）：与 dsh 模式的 hero 直接开聊同语义，且不会漏建
+if (this.findDirectConversation(this.currentSessionId) === null) {
+  this.beginDirectConversation(text);
+}
+```
+
+**同一族的第二处**：`adoptDirectConversation()`（进独立模式时把当前正文收进本机会话清单）原先在
+`this.messages.length === 0` 时直接 `return`，把那枚悬挂的 dsh id 原样留在原地 —— 一样会漏建。现在先清掉不属于本机会话的
+id（正文也是空的时候连标题一起复位成「新会话」，标题栏与侧栏的口径才一致）。
+
+**第三处：切模式时的双向污染**。切走的瞬间，上一模式的服务端流还开着、回来照样往状态里写：
+`session/list` 的全量回包会把侧栏从「本机会话投影」换成服务端那几百条会话；当前会话的 `follow` 快照会把独立模式的正文整段
+覆盖；宿主 `$events` 的 `api-session/added` 会往侧栏插服务端行。三处各加一句模式守卫（dsh 模式行为不变）：
+
+| 位置 | 守卫 |
+| --- | --- |
+| `refreshSessions()` 的 then 回包 | `if (this.mode !== 'dsh') { this.releaseSessionRefresh(); return; }` |
+| `onFollowValue()`（当前会话 follow 流） | `if (this.mode !== 'dsh') return;` |
+| `onHostEvent()`（宿主 `$events`） | `if (this.mode !== 'dsh') return;` |
+
+**真机验收（18:12–18:18，以 `uitest dumpLayout` 为准）**：
+
+- **复现（修复前）**：dsh 服务模式点一条空会话（`currentSessionId` 非空、正文空）→ 切回独立模式 → 发「测试乙」→ 回答正常、侧栏仍「还没有会话」。
+- **修复后同一路径**：切回独立模式时标题栏即刻复位为「新会话」；发「回归乙」→ 侧栏顶部当场出现「回归乙 18:16」，下面留着上一轮「回归甲 18:15」。
+- **回归**：冷启动独立模式发「回归甲」→ 侧栏照常出行（旧行为没被破坏）。
+- **模式隔离**：独立模式下用命令行 `POST /api/session/create` 造活动（另一路 `$events` 探针同期收到 `api-session/added`）→ 应用侧栏纹丝不动；
+  切到 dsh 服务模式后再造一次 → 两行「新会话 18:17」照旧实时冒出来（实时链路没被守卫打断）。
+- **回归检查**：`scripts/direct-mode-check.mjs` **41 → 47 项**（新增上面六条接线契约）；`direct-mode-check` 的静态契约从此覆盖
+  「独立模式出行」这条路径，别再退回按 `length === 0` 判。
+
 ## 构建与验证
 
 ```sh
@@ -157,18 +341,18 @@ cd ~/dsh-harmonyos-pc/client && rm -rf .hvigor entry/build
 sh ~/bin/deveco-api26.sh . assembleHap --mode module \
   -p module=entry@default -p requiredDeviceType=2in1 -p product=default -p buildMode=release
 # 产物：entry/build/default/outputs/default/entry-default-unsigned.hap
-#       742,569 B / ets/modules.abc 687,544 B（字形 strokeWidth(0) 消重影那一轮）
+#       769,014 B / ets/modules.abc 713,988 B（第七轮：独立模式侧栏出行 + 模式隔离守卫）
 #       （HAP 是 zip，包内文件带 mtime ⇒ 同一份源码两次构建 sha256 不同；体积与 `ets/modules.abc` 字节数才是可比对量）
 # 副本：client/dist/dsh-harmonyos-client-1.0.0-release-unsigned.hap（与 ~/Download/ 各一份）
 ```
 
-- 现状：**编译通过**，产出未签名 HAP（本机无签名配置 → 不能 `hdc install`；真机安装需 DevEco 配好签名/Provision Profile）。
+- 现状：**编译通过**，产出未签名 HAP（本机无签名配置 → 不能直接 `hdc install`，会报 `error: no signature file`）。真机安装＝用调试证书（profile 的 UDID 白名单要含本机）`hap-sign-tool sign-app` 签一次再 `hdc install`；本轮已按这条路装到本机鸿蒙 PC 上实测。
 - 为什么天然未签名：`client/build-profile.json5` 的 `signingConfigs` 是空数组，hvigor 到 `SignHap` 阶段只打印 `WARN: No signingConfig found for product default` 就跳过 —— 包内没有 `META-INF/`、没有证书与 profile。要签名只需往 `signingConfigs` 填 DevEco 生成的证书 + profile。
-- 体积：release **742,569 B**（`ets/modules.abc` **687,544 B** + 三份 4,047 B 的官方图标 + 契约 + 内置对话模式表 `rawfile/presets.json` + `pack.info`）。比 UI 复刻前的 284,192 B 大，全部来自新增的令牌表、94 个字形、官方 1024 图标的矢量数据与内置预设提示（release 仍开 `obfuscation`，包内无 sourcemap）。sha256 `4a982689f659f8c907e4cb7fc81b455d39d649f7e3a44b3408d9566e4f5605e3`（`client/dist/` 与 `~/Download/` 一致）。
+- 体积：release **769,014 B**（`ets/modules.abc` **713,988 B** + 三份 4,047 B 的官方图标 + 契约 + 内置对话模式表 `rawfile/presets.json` + `pack.info`）。比 UI 复刻前的 284,192 B 大，全部来自新增的令牌表、94 个字形、官方 1024 图标的矢量数据与内置预设提示（release 仍开 `obfuscation`，包内无 sourcemap）。sha256 `af4a1f45b6c8f4bd35e39fbc9dad59bcfabb2d4fc511ca46c9610caef8fba3bd`（`client/dist/` 与 `~/Download/` 一致；HAP 是 zip 且包内文件带 mtime，同一份源码两次构建 sha 会不同，**体积与 `ets/modules.abc` 字节数才是可比对量**）。
 - 包内容（release，11 项）：`module.json`、`resources.index`、`resources/base/media/{app_icon,icon,startIcon}.svg`、`resources/base/profile/main_pages.json`、`resources/rawfile/desktop-shell.json`、**`resources/rawfile/presets.json`**、`ets/modules.abc`、`pack.info`、`pkgSdkInfo.json`。
-- 已验证：ArkTS 编译零错误（仅剩 1 条无害 WARN：`startMoving` 起于 API 14，已用 `deviceInfo.sdkApiVersion` 门控）；`desktop-shell-check.mjs` **32/32**（含单位防回归：把 `resize()` 的实参改回裸 vp 值后脚本 exit 1 并能逐条指认，改回即恢复全绿；另含 3 项「每个 Path 必须显式 strokeWidth」的消重影防回归）；`gen-harmony-ui-assets.mjs --check` 五份生成物与磁盘一致（令牌 181 · 字形 94）；`gen-client-presets.mjs --check` 通过（`rawfile/presets.json` 与 `presets/` 一致，8 套模式）；契约负向测试（改坏 `defaultWidth` → 脚本 exit 1 且精确指认）；应用图标用自写的 `scripts/svg-preview.py`（纯标准库光栅化，`python3 scripts/svg-preview.py <in.svg> <out.png> [尺寸] [--bg #RRGGBB] [--scale S] [--pen W]`）渲染核对过几何——鲸鱼路径 `x 150.138..910.32 / y 260.291..819.325` 与上游 bbox 经同一线性映射后的结果逐位相同；`IconBrandWordmark` 的字标墨迹实测 `x 26.96..181.35 / y 4.63..21.64`（= 上游 `includeMark=false` 的 `26 0 156 24` 视口）；包内 `ets/modules.abc` 抽查含 `IconBrandFull` 的鲸鱼路径（`M23.0584 4.95203`，1 次）、`PresetCatalog`、`session/selectModel`、`maxRedirects`，并用 `ark_disasm` 反汇编确认 `strokeWidth(0)` 调用点 **87 处**（85 个填充字形 + `FishMark` + 发送箭头）——ABC 里是 `ldobjbyname "strokeWidth"` + `ldai 0x0` + `callthis1`，不是字符串，别再用 `grep strokeWidth(0)` 查包。
+- 已验证：ArkTS 编译零错误（仅剩 1 条无害 WARN：`startMoving` 起于 API 14，已用 `deviceInfo.sdkApiVersion` 门控）；`direct-mode-check.mjs` **41/41**（含 6 条思维链用例：逐帧 CoT / CoT 不污染正文 / 整条流含残帧 / 非推理模型为空 / keep-alive / 非 SSE 整段 JSON 的 CoT）；`desktop-shell-check.mjs` **33/33**（含单位防回归：把 `resize()` 的实参改回裸 vp 值后脚本 exit 1 并能逐条指认，改回即恢复全绿；另含 3 项「每个 Path 必须显式 strokeWidth」的消重影防回归）；`session-live-check.mjs` **50/50**（`$events` 事件流 / 侧栏就地更新 / 思维链两个来源，喂真服务抓包固件）；`gen-harmony-ui-assets.mjs --check` 五份生成物与磁盘一致（令牌 181 · 字形 94）；`gen-client-presets.mjs --check` 通过（`rawfile/presets.json` 与 `presets/` 一致，8 套模式）；契约负向测试（改坏 `defaultWidth` → 脚本 exit 1 且精确指认）；应用图标用自写的 `scripts/svg-preview.py`（纯标准库光栅化，`python3 scripts/svg-preview.py <in.svg> <out.png> [尺寸] [--bg #RRGGBB] [--scale S] [--pen W]`）渲染核对过几何——鲸鱼路径 `x 150.138..910.32 / y 260.291..819.325` 与上游 bbox 经同一线性映射后的结果逐位相同；`IconBrandWordmark` 的字标墨迹实测 `x 26.96..181.35 / y 4.63..21.64`（= 上游 `includeMark=false` 的 `26 0 156 24` 视口）；包内 `ets/modules.abc` 抽查含 `IconBrandFull` 的鲸鱼路径（`M23.0584 4.95203`，1 次）、`PresetCatalog`、`session/selectModel`、`maxRedirects`，并用 `ark_disasm` 反汇编确认 `strokeWidth(0)` 调用点 **87 处**（85 个填充字形 + `FishMark` + 发送箭头）——ABC 里是 `ldobjbyname "strokeWidth"` + `ldai 0x0` + `callthis1`，不是字符串，别再用 `grep strokeWidth(0)` 查包。
 - 链路实测（curl，本机）：`GET /` → 303 + `set-cookie: dsh-auth-*`；带该 cookie `POST /api/session/list` → 200；`ws://127.0.0.1:3080/api/remote.mux` 握手 → **101**。
-- 未验证：真机 UI 行为（无在线设备，`hdc list targets` 为空）。所有窗口/选择器/更新调用都写了 try-catch 与失败提示，不会把异常抛到 UI 线程。
+- 已验证（2026-09-26 第五轮）：真机（本机鸿蒙 PC）装机 + 独立模式端到端对话 + 截图（思维链行与回答同时出现）。未验证：`dsh` 服务模式下的侧栏「别处新建会话秒出现」对照。所有窗口/选择器/更新调用都写了 try-catch 与失败提示，不会把异常抛到 UI 线程。
 
 ## 字形绘制：ArkUI 会给**每个** `Path` 描两遍边（左上角 logo「重影」的真因）
 

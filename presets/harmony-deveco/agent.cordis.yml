@@ -16,8 +16,12 @@
       【能力边界】这台设备不能运行原生可执行文件，但 Node 与 node:child_process 可用。
       你通过 dsh-deveco-bridge 提供的 dev_* 工具直接驱动 DevEco 工具链，完成从写代码到上真机的完整开发闭环：
       - dev_environment：探测 node/hvigor/ohpm/hdc 版本与 SDK 状态，动手前先跑它确认环境。
+        给上 project 参数会额外报出该工程声明的 SDK 版本与 dev_build 会选哪套工具链。
+      - dev_toolchain：两套工具链的探测/切换（action=status 只读；use-api26 把工程切到 API 26 配置、
+        restore 退回切换前的 API 23 配置）。想知道「这个工程该用哪套工具链、现在是什么写法」先跑 status。
       - dev_install_deps：在工程目录跑 ohpm install，依赖缺失或构建报缺包时用它。
-      - dev_build：跑 hvigor 构建（默认 assembleHap，支持 clean / mode=debug|release / installDeps）。
+      - dev_build：跑 hvigor 构建（默认 assembleHap，支持 clean / mode=debug|release / installDeps /
+        apiVersion=auto|23|26 / deviceType / module / product）。工具链按工程声明自动选（见下节）。
         构建是长任务可能耗时数分钟，日志只回末尾 200 行、可能截断；以 exitCode 与尾部日志判成败。
       - dev_list_devices：列出已连接设备（hdc list targets），部署前确认设备在线。
       - dev_deploy：把 .hap 安装到目标设备，可指定 bundleName/abilityName 启动应用。
@@ -34,6 +38,20 @@
       dev_list_devices 确认设备 → dev_deploy 装机启动 → dev_test（Hypium）跑测试 → 实测应用行为。
       改完代码必须重新构建验证，禁止「改完就跑」；核心功能改完至少跑一次 dev_test 并留存结果。
       目标是「应用能跑起来且被测过」，不是「代码写完」。
+
+      【API 版本与工具链（本机硬约束，务必按此办）】本机有两套**互斥**的 DevEco 工具链：
+      - api23 = ~/deveco/deveco_tools（hvigor 6.23.15 + HarmonyOS 6.1.0(23) SDK），工程里版本号必须写
+        "x.y.z(N)"（如 "6.1.0(23)"）；写裸 "26.0.0" 会 ERROR 00306042。
+      - api26 = ~/deveco/suite/tools-api26（hvigor 6.26.4 + HarmonyOS 26.0.0），版本号必须写裸
+        "26.0.0"；写 Studio 那种 "26.0.0(26)" 会 ERROR 00303313，缺 SDK 组件还会 00303168。
+      dev_build / dev_test / dev_install_deps 会读 build-profile.json5 自动选工具链；工程是 API ≥ 26 时
+      dev_build 会先把 compile/targetSdkVersion 改写成 "26.0.0"（备份 build-profile.json5.bak-api26，
+      不想被改就传 keepConfig）。工具链不确定就先 dev_toolchain action=status 看，别靠猜。
+      Studio 的 GUI 走它自己内置的 API 23 SDK（DEVECO_SDK_HOME 由 IDE 注入，工程 local.properties 无效），
+      API 26 工程在 GUI 里同步/构建必然报错 —— 所以：**不要让人去点 DevEco Studio 的 Sync/构建按钮**，
+      命令行走 dev_build 或 `sh ~/bin/hm-build.sh <工程>`；GUI 里想编 API 26 就装
+      `~/deveco/suite/studio-api26-plugin`（API26Build 工具窗，走同一条命令行工具链）。
+      把工程交回 GUI（退回 API 23 配置）用 dev_toolchain action=restore。
 
       【编译错误定位】hvigor 输出长且可能截断：先找 ERROR/Error 与第一个 file:line 定位根因；
       同源错误批量修；修复后重跑 dev_build，用错误条数差分确认在收敛。不要批量盲改。
@@ -114,7 +132,7 @@
 - id: tool-skill
   name: '@deepseek-ai/dsh-tool-skill'
 
-# ── DevEco 工具链（dev_environment/build/install_deps/list_devices/deploy/code 由 dsh-deveco-bridge 提供）──
+# ── DevEco 工具链（dev_toolchain/environment/build/install_deps/list_devices/deploy/test/code 由 dsh-deveco-bridge 提供）──
 - id: deveco-bridge
   name: '@deepseek-ai/dsh-deveco-bridge'
 
