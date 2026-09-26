@@ -8,7 +8,7 @@
   <img alt="HarmonyOS" src="https://img.shields.io/badge/HarmonyOS-Adapt-blue">
   <img alt="DeepSeek Harness" src="https://img.shields.io/badge/DeepSeek_Harness-dsh-41b0ff">
   <img alt="Cache Hit" src="https://img.shields.io/badge/Cache_Hit-98%25-orange">
-  <img alt="Node.js 22 / 24" src="https://img.shields.io/badge/Node.js-22%E2%80%9324-black">
+  <img alt="Node.js 22 / 24 / 26（不锁版本）" src="https://img.shields.io/badge/Node.js-22%E2%80%9326-black">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
 </p>
 
@@ -458,16 +458,17 @@ node hvigorw.js assembleHap
 | `scripts/dsh-hm-install.mjs` | GitHub 源插件一键安装（绕过 isogit 拦截） |
 | `scripts/dsh-hm-update.sh` | **一键更新**（官方 dsh 升级 + 仓库预设/插件/补丁同步，`check` / 默认 update） |
 | `scripts/node-runtime.sh` | 公共运行时解析（各启动脚本 source 用）：探测本机所有 node，挑「版本最高、且真能跑起来」的那个 |
-| `scripts/dsh-runtime-check.mjs` | 运行时选择回归（22 项，用假 node 把每条分支跑出来） |
+| `scripts/dsh-runtime-check.mjs` | 运行时选择回归（24 项，用假 node 把每条分支跑出来） |
 
-**node 版本：不锁。能跑最新的就用最新的。** 官方 dsh 基线要 node ≥ 22.18（本仓的 `compat-loader` 把它兜到鸿蒙自带的 v22.7），
-而鸿蒙上自带的 hnp node 是 **v24.13**（最新线）——但同一个 v24 二进制在部分鸿蒙设备/受限通道上会在 V8 初始化阶段**偶发**原生崩
+**node 版本：不锁。能跑最新的就用最新的（当前最新线 = Node 26.10.0，现役 LTS = 24.21.0）。** 官方 dsh 基线要 node ≥ 22.18（本仓的 `compat-loader` 把它兜到鸿蒙自带的 v22.7），
+而鸿蒙上自带的 hnp node 是 **v24.13**——但同一个 v24 二进制在部分鸿蒙设备/受限通道上会在 V8 初始化阶段**偶发**原生崩
 （code-range 预留 mmap 失败 → `Fatal error in , line 0` / `Check failed: 12 == (*__errno_location())`，没有官方开关可关），
 deveco 自带的 v22.7 反而稳定。所以脚本不再写死路径，而是：
 
-1. 把本机能找到的 node 全列出来（`/data/service/hnp/node.org/node_*/bin/node`、`~/deveco/deveco_tools/node/bin/node`、`PATH` 里的、常见目录）；
+1. 把本机能找到的 node 全列出来（`/data/service/hnp/node.org/node_*/bin/node`、`~/deveco/deveco_tools/node/bin/node`、`PATH` 里的、常见目录）——
+   hnp 那批是按 `node_*` 目录扫的，**hnp 哪天把 node 升到 26 也自动跟上，不用改脚本**；
 2. 按**版本从高到低**各跑一次 `-e 'process.exit(0)'` 冒烟（崩是偶发的，给 3 次机会）；
-3. 第一个真能起来的就用 —— **Node 24 能用就用 24，起不来自动退 22**，两种机器都不用改命令；
+3. 第一个真能起来的就用 —— **本机装到 26 就用 26，退其次 24、最后 22**，两种机器都不用改命令；
 4. 开关（`--expose-internals` / `--experimental-sqlite` / `compat-loader`）按**运行时能力探测**，绝不塞它不认的参数（v24 原生有 `node:sqlite`、原生 zstd，就不再加垫片参数）。
 
 - 只看会选哪个、带什么开关：`sh scripts/dsh-web.sh --print-node`（`dsh-update.sh` / `dsh-hm-update.sh` / `dsh-update-web.sh` 同样支持，只探测、不启动、不动在跑的服务）
@@ -519,6 +520,21 @@ MIT License，见 [LICENSE](LICENSE)。
 ---
 
 ## 更新记录
+
+### 2026-09-26（补一轮）— node 支持口径对齐「最新线」：Node 26.10.0 / LTS 24.21.0，依旧不锁版本
+
+- **为什么还有这一轮**：上一轮把运行时改成了自适应（能跑最高的就用最高的），但**对外口径**只写到 24（徽章 `Node.js 22–24`、文档写「最新线 v24」）。
+  查 node 官方 dist index：**最新线是 Node 26.10.0**（2026-09-21 发布，Current 线）、**现役 LTS 是 24.21.0**（Krypton，2026-09-07）。
+  本次把仓库对外的 node 口径统一成「**不锁版本：≥22.18 是官方基线下限，上限跟着本机能跑的最高版本走（26 → 24 → 22 依次退）**」。
+- **改动**：README 中英徽章 `Node.js 22–24` → `22–26`；README 中英「工具链」段与新手教程「前置准备」写明最新线 / LTS 的具体版本号与「26 优先」的退让顺序；
+  `scripts/node-runtime.sh` 头注释同步（不再写「当前 = Node 24」）。
+- **顺手收掉最后一处写死的版本**：`scripts/dsh-hm-install.mjs` 里找 npm/hdc 的回退路径还钉着 hnp `node_v24.13.0`，
+  现在改成扫 `/data/service/hnp/node.org/node_*/bin/` 并按**版本从高到低**取 —— hnp 哪天升到 26，这条回退路径不用改代码就跟着走。
+- **回归**：`node scripts/dsh-runtime-check.mjs` **22 → 24 项**（新增「脚本里不再出现写死的 hnp 版本号 `node_v<数字>`」「hm-install 的 hnp 回退路径按版本 glob」）；
+  `desktop-shell-check.mjs` 33/33、`direct-mode-check.mjs` 47/47、`session-live-check.mjs` 58/58、`gen-harmony-ui-assets.mjs --check` 5/5 不变。
+- **没吹的部分（口径说清）**：本机能拿到的 node 只有 hnp v24.13（V8 初始化崩）与 deveco v22.7（稳），`nodejs.org` 的 `linux-arm64` 官方二进制在鸿蒙上**根本执行不了**
+  （`permission denied`，不是同一套 ABI / 加载器）——所以「26 也能用」不是本机跑出来的，而是从脚本行为推出来的：候选按版本降序 + 冒烟挑第一个能起来的 + 开关按能力探测
+  （`--experimental-loader` 在 26 的 man 里仍然存在）。等鸿蒙侧有 node 26 的构建（hnp 或 DevEco 自带），上手即为准。
 
 ### 2026-09-26 — 运行时不再锁 node 22：能跑 Node 24 就用 24，起不来才退 22（四个启动脚本统一）
 

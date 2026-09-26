@@ -127,6 +127,25 @@ function retargetToTscOut(pluginDir) {
 const BUILD_INSTALL_MS = 8 * 60 * 1000; // pnpm/npm install budget
 const BUILD_SCRIPT_MS = 5 * 60 * 1000;  // build script budget
 
+/** hnp 装的 node 版本目录（`/data/service/hnp/node.org/node_v<ver>`），**按版本从高到低**。
+ *  不写死某个版本号：hnp 哪天把 node 升到 26，这里跟着走，不用改代码。 */
+function hnpNodeBins() {
+  const base = '/data/service/hnp/node.org';
+  try {
+    return readdirSync(base)
+      .filter((d) => d.startsWith('node_'))
+      .map((d) => ({ dir: d, ver: (d.match(/\d+(?:\.\d+)*/) || ['0'])[0].split('.').map(Number) }))
+      .sort((a, b) => {
+        for (let i = 0; i < 3; i++) {
+          const d = (b.ver[i] || 0) - (a.ver[i] || 0);
+          if (d !== 0) return d;
+        }
+        return 0;
+      })
+      .map(({ dir }) => join(base, dir, 'bin'));
+  } catch { return []; }
+}
+
 /** Resolve a tool on PATH, falling back to known HarmonyOS install dirs. */
 function toolBin(name) {
   try {
@@ -135,11 +154,12 @@ function toolBin(name) {
     if (p) return p;
   } catch { /* fall through */ }
   const home = homedir();
+  const hnpBins = hnpNodeBins();
   for (const c of [
-    // 跟着**当前正在跑的 node** 找（Node 24 也好、鸿蒙退到的 v22 也好，都不写死版本）
+    // 跟着**当前正在跑的 node** 找（Node 26/24 也好、鸿蒙退到的 v22 也好，都不写死版本）
     join(dirname(process.execPath), name),
     join(home, '.npm-global', 'bin', name),
-    '/data/service/hnp/node.org/node_v24.13.0/bin/' + name,
+    ...hnpBins.map((b) => join(b, name)),
     join(home, 'node-v22.14.0-linux-arm64', 'bin', name),
   ]) if (existsSync(c)) return c;
   return name;

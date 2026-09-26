@@ -20,7 +20,7 @@
  * 退出码：0 = 全部通过；1 = 有检查失败。
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -155,6 +155,14 @@ try {
   const hmInstall = readFileSync(join(root, 'scripts', 'dsh-hm-install.mjs'), 'utf8')
   check('dsh-hm-install.mjs 找 npm 先看当前 node 的 bin 目录',
     /join\(dirname\(process\.execPath\), name\)/.test(hmInstall), '没有跟随当前 node')
+  check('dsh-hm-install.mjs 的 hnp 回退路径按版本 glob（hnp 升到 26 也不用改代码）',
+    /readdirSync\(base\)/.test(hmInstall) && !/node_v\d/.test(hmInstall), '仍写死 hnp 版本')
+  // 支持最新 node 的前提：哪都不许把版本钉死（node_v<数字> 就是 hnp 的某个具体版本目录）
+  const pinned = readdirSync(join(root, 'scripts'))
+    .filter((f) => /\.(sh|mjs|cjs)$/.test(f))
+    .filter((f) => /node_v\d/.test(readFileSync(join(root, 'scripts', f), 'utf8')))
+  check('scripts/ 下没有任何脚本写死 hnp 的 node 版本目录（node_v<数字>）',
+    pinned.length === 0, pinned.join(', '))
 
   // ⑦ 真机一致性：本机（鸿蒙 PC）的真实探测结果
   const real = spawnSync('sh', [script, '--print-node'], { encoding: 'utf8' })

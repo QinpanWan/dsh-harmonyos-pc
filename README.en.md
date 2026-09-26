@@ -8,7 +8,7 @@
   <img alt="HarmonyOS" src="https://img.shields.io/badge/HarmonyOS-Adapt-blue">
   <img alt="DeepSeek Harness" src="https://img.shields.io/badge/DeepSeek_Harness-dsh-41b0ff">
   <img alt="Cache Hit" src="https://img.shields.io/badge/Cache_Hit-98%25-orange">
-  <img alt="Node.js 22 / 24" src="https://img.shields.io/badge/Node.js-22%E2%80%9324-black">
+  <img alt="Node.js 22 / 24 / 26 (not pinned)" src="https://img.shields.io/badge/Node.js-22%E2%80%9326-black">
   <img alt="License" src="https://img.shields.io/badge/License-MIT-green">
 </p>
 
@@ -321,17 +321,17 @@ Raw data `bench/result.json`, report `bench/result.md`; the benchmark script `be
 | `scripts/dsh-update-web.sh` | Settings and update page (3098, embedded HTML) |
 | `scripts/dsh-hm-install.mjs` | One-click install of GitHub-source plugins (bypasses isogit interception) |
 | `scripts/node-runtime.sh` | Shared runtime resolver (sourced by every launcher): probes all local node builds and picks the highest one that actually boots |
-| `scripts/dsh-runtime-check.mjs` | Runtime-selection regression (22 checks, every branch exercised with fake node binaries) |
+| `scripts/dsh-runtime-check.mjs` | Runtime-selection regression (24 checks, every branch exercised with fake node binaries) |
 
-**Node version: not pinned — use the newest one that runs.** Upstream dsh targets node ≥ 22.18 (this repo's `compat-loader`
-drops that floor to the v22.7 that ships with HarmonyOS tooling), while the HarmonyOS-bundled hnp node is **v24.13**
-(the latest line). But on some HarmonyOS devices/channels that very v24 build dies natively during V8 init
+**Node version: not pinned — use the newest one that runs (latest line = Node 26.10.0, active LTS = 24.21.0).** Upstream dsh targets node ≥ 22.18 (this repo's `compat-loader`
+drops that floor to the v22.7 that ships with HarmonyOS tooling), while the HarmonyOS-bundled hnp node is **v24.13**. But on some HarmonyOS devices/channels that very v24 build dies natively during V8 init
 (code-range reservation `mmap` fails → `Fatal error in , line 0` / `Check failed: 12 == (*__errno_location())`,
 with no upstream switch to disable it), whereas deveco's v22.7 is stable. So no script hardcodes a path any more:
 
-1. enumerate every node it can find (`/data/service/hnp/node.org/node_*/bin/node`, `~/deveco/deveco_tools/node/bin/node`, whatever is on `PATH`, common install dirs);
+1. enumerate every node it can find (`/data/service/hnp/node.org/node_*/bin/node`, `~/deveco/deveco_tools/node/bin/node`, whatever is on `PATH`, common install dirs) —
+   the hnp entries are matched by `node_*` directory, so **an hnp upgrade to Node 26 is picked up with no script change**;
 2. smoke-test each one **highest version first** with `-e 'process.exit(0)'` (the crash is flaky, so it gets 3 tries);
-3. take the first that really boots — **use Node 24 when it works, fall back to 22 when it does not**; neither machine has to change a command;
+3. take the first that really boots — **26 if the machine has it, then 24, then 22**; neither machine has to change a command;
 4. derive flags (`--expose-internals` / `--experimental-sqlite` / `compat-loader`) from **runtime capability probing**, never passing a flag the runtime would reject (v24 has native `node:sqlite` and native zstd, so no shim flags).
 
 - Just see which one wins and with which flags: `sh scripts/dsh-web.sh --print-node` (also supported by `dsh-update.sh` / `dsh-hm-update.sh` / `dsh-update-web.sh`; probe only, starts nothing, touches no running service)
@@ -403,6 +403,23 @@ One exception: `desktop-upstream/` is a **source snapshot** of the official desk
 ---
 
 ## Changelog
+
+### 2026-09-26 (follow-up) — node support statement aligned with the latest line: Node 26.10.0 / LTS 24.21.0, still not pinned
+
+- **Why another pass**: the previous round made the runtime adaptive (highest bootable wins), but the public statement still only reached 24
+  (badge `Node.js 22–24`, docs "latest line v24"). Per node's official dist index, the **latest line is Node 26.10.0** (released 2026-09-21, Current)
+  and the **active LTS is 24.21.0** (Krypton, 2026-09-07). The repo now says: **not pinned — ≥22.18 is upstream's floor, and the ceiling follows the
+  highest build that actually boots on the machine (26 → 24 → 22)**.
+- **Changes**: badges `Node.js 22–24` → `22–26` in both READMEs; the "toolchain" section (both READMEs) and the beginner tutorial prerequisites now carry
+  the concrete latest/LTS numbers and the 26-first fallback order; `scripts/node-runtime.sh` header comment updated (no more "currently Node 24").
+- **Last hardcoded version removed**: `scripts/dsh-hm-install.mjs` still pinned hnp `node_v24.13.0` in its npm/hdc fallback list; it now globs
+  `/data/service/hnp/node.org/node_*/bin/` and takes the **highest version**, so an hnp upgrade to 26 needs no code change.
+- **Regression**: `node scripts/dsh-runtime-check.mjs` **22 → 24 checks** (adds "no script hardcodes an hnp version `node_v<digits>`" and "hm-install globs hnp versions");
+  `desktop-shell-check.mjs` 33/33, `direct-mode-check.mjs` 47/47, `session-live-check.mjs` 58/58, `gen-harmony-ui-assets.mjs --check` 5/5 unchanged.
+- **Honest scope**: this machine only has hnp v24.13 (dies in V8 init) and deveco v22.7 (stable), and the official `nodejs.org` `linux-arm64` binaries cannot even
+  execute on HarmonyOS (`permission denied` — different ABI/loader). So "26 works" is derived from the script's behaviour (descending version order, boot smoke
+  test, capability-probed flags; `--experimental-loader` is still in the Node 26 man page), not measured here. Once a HarmonyOS build of Node 26 exists
+  (hnp or DevEco), that becomes the real test.
 
 ### 2026-09-26 — Node version no longer pinned to 22: use 24 when it boots, fall back to 22 when it does not (all four launchers)
 
