@@ -55,6 +55,16 @@ test("插件守卫消息不算新用户问题", () => {
   assert.equal(lastUserIndex(messages), 0);
 });
 
+test("v4 producer-owned 守卫消息同样不算新用户问题", () => {
+  const messages = [
+    { role: "user", content: "问题" },
+    { role: "user", content: "守卫", source: { kind: "plugin:huawei-devdocs" } },
+  ];
+  assert.equal(lastUserIndex(messages), 0);
+  // 末尾的守卫被跳过 → 返回的是它前面那条真实用户消息
+  assert.equal(lastUserIndex([{ role: "user", content: "新问题", source: { kind: "user" } }, ...messages]), 1);
+});
+
 test("注入决策：未检索注入 / 已检索不注入 / 达上限停", () => {
   assert.equal(decideInjection({ harmony: true, searched: false, injections: 0 }).inject, true);
   assert.equal(decideInjection({ harmony: true, searched: true, injections: 0 }).inject, false);

@@ -125,6 +125,19 @@ function deployPresets(top) {
   return n;
 }
 
+// 0.2.x 起 preset 不再扫 ~/.dsh/.agent-presets/：必须把仓库 presets/ 重新生成成 profile patch 里的
+// @deepseek-ai/dsh-agent-preset 声明块（否则新会话落回内置 standard preset、老会话 resume 报
+// Unknown agent preset）。deployPresets 之后跑一次即可；gen-preset-registry.mjs 幂等且自带备份。
+function deployPresetRegistry() {
+  const script = join(HERE, 'gen-preset-registry.mjs');
+  if (!existsSync(script)) return false;
+  const r = run([script]);
+  const out = String(r.out || '').trim();
+  if (out) log('  ' + out.split('\n').join('\n  '));
+  if (!r.ok) log('  ⚠ preset registry 生成失败（见上），预设可能不生效');
+  return r.ok;
+}
+
 // 部署 tarball plugins/@deepseek-ai/ 下的全部插件：copy 到 dsh-test node_modules + profile 软链。
 // 每加一个新仓库插件（如 dsh-deveco-bridge）无需改脚本，遍历目录即可。
 function deployPlugins(top) {
@@ -232,6 +245,7 @@ async function update() {
       log(`  同步本机仓库副本 ${ns} 项（presets/plugins/scripts/patch）`);
       const np = deployPresets(top);
       log(`  部署预设 ${np} 套 → ~/.dsh/.agent-presets/`);
+      deployPresetRegistry();
       const npl = deployPlugins(top);
       if (npl > 0) log(`  部署插件 ${npl} 个（基础 node_modules + profile 软链）`);
       else log('  ⚠ tarball 里没有插件目录，跳过');

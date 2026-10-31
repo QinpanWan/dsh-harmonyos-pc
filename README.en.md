@@ -405,6 +405,16 @@ One exception: `desktop-upstream/` is a **source snapshot** of the official desk
 
 ## Changelog
 
+### 2026-10-31 — Follow upstream 0.2.1-rc.5 (npm `latest` channel correction + rc.5 codec anchor + compatibility carry-forward)
+
+- **Upstream check**: npm `dist-tags.latest` is **0.2.1-rc.5** (released 2026-10-29), while the `alpha` channel has 0.2.2-alpha.2 (10-27). This device moved from 0.2.1-alpha.2 to **0.2.1-rc.5**; `dsh-update.sh check` now reports `upToDate: true`.
+- **Update channel**: `getLatest()` in `dsh-update.mjs` now prefers `dist-tags.latest` and only falls back to the highest semver when the registry has no tag. This prevents the next-line alpha from being treated as the default latest and then downgrading the installed rc on the following update.
+- **rc.5 patch adaptation**: `dsh-typert-loader` moved the codec `create()` validation into `requireSchemaProjection()`; `patchTypertCodecCompat` now supports both the alpha.2 anchor and the rc.5 anchor. All 20 HarmonyOS patches hit.
+- **Compatibility carry-forward**: when upgrading a patch line, exact-version exemptions in `~/.dsh/profiles/web/compatibility.json` are copied from the previous runtime version to the new one. Only already-approved entries are carried, so the approval surface does not grow; 46 entries were carried this round.
+- **Preset registry (0.2.x)**: new `scripts/gen-preset-registry.mjs` generates the `@deepseek-ai/dsh-agent-preset` declaration block in the profile patch from the repository's `presets/`; `dsh-hm-update.mjs` re-runs it after deploying presets. Persona prompts also drop the `{{cwd}}` variable that 0.2.x no longer registers.
+- **Restart robustness**: the updater raises the startup health window from 30s to 120s and treats an early HTTP 404 as “process is listening”, so a busy profile is not reported as a failed restart.
+- **Verification**: an isolated install pulled 617 packages for rc.5, and patching plus a 3081 probe boot passed; the production 3080 returned 200 after authentication (index 41,908 B); `dsh-runtime-check` 24/24, `desktop-shell-check` 33/33, `direct-mode-check` 47/47, `session-live-check` 58/58, UI assets 5/5, preset registry 8/8 presets consistent, huawei-devdocs enforce 9/9 + render 1/1.
+
 ### 2026-10-09 — Follow upstream 0.2.1-alpha.1 / alpha.2 (big-refactor migration: rewritten settings shim + pure-JS replacement for a native addon + six plugin codecs adapted; this device now runs 0.2.1-alpha.2)
 
 - **Background**: the latest upstream line is `0.2.1-alpha.1` (released 2026-10-03). It rewrites `dsh-settings` from `SettingsProvider` to `SettingsForms` (auto-partitioned by configEditor's Config schema) and **removes** `settingsNamespace` / `installSettingsSection` / `settings.register` / `settings.get`,

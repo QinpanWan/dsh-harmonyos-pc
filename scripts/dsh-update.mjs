@@ -56,6 +56,13 @@ const SETTINGS_COMPAT_FILE = join(__dirname, 'dsh-settings-compat.mjs');
 const REQUIRE_BUILTIN_FILE = join(DSH_DIR, 'node_modules', 'node-addon-require-builtin', 'lib', 'index.js');
 // 0.2.x typert 校验要求 codec 带 create() 工厂；社区插件手写清单仍是 0.1.x 的 {mode,typeSymbol,schema}。
 const TYPERT_LOADER_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-typert-loader', 'lib', 'index.js');
+// 同上，但客户端面：前端 remote.$mount 贡献走 dsh-typert-registry 的 validateCodec，同样要 create()；
+// host 只补 loader 不够，否则 web 启动红屏「x entries did not activate (failed)」。
+const TYPERT_REGISTRY_CLIENT_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-typert-registry', 'lib', 'client.js');
+const TYPERT_REGISTRY_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-typert-registry', 'lib', 'index.js');
+// 0.2.x 客户端设置移除了 settingsScope 服务(0.1.0-rc.x 后被 settingsSchema/configForms 取代)；
+// dsh-skin-manager@0.1.6 仅在 inject 里声明、从不调用 → 永久 pending。
+const SKIN_MANAGER_CLIENT_FILE = join(HOME, '.dsh', 'profiles', 'web', 'plugins-src', 'dsh-skin-manager', 'lib', 'client.js');
 const DSH_LOADER_MJS = join(DSH_DIR, 'compat-loader.mjs');
 const DSH_LOADER_CJS = join(DSH_DIR, 'compat-loader-cjs.cjs');
 const WORKER_CJS_FILE = join(DSH_DIR, 'node_modules', '@deepseek-ai', 'dsh-session-persistence-jsonl', 'lib', 'worker.cjs');
@@ -85,7 +92,7 @@ function sh(cmd, args, opts = {}) {
   args = args.concat(opts.extra || []);
   const r = spawnSync(cmd, args, {
     encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
-    timeout: opts.timeout ?? 600000, cwd: opts.cwd, env: { ...process.env, CI: 'true' },
+    timeout: opts.timeout ?? 600000, cwd: opts.cwd, env: { ...process.env, CI: 'true', ...(opts.env || {}) },
   });
   return { ok: r.status === 0, code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
@@ -108,14 +115,17 @@ function readInstalled() {
   try { return String(JSON.parse(readFileSync(PKG, 'utf8')).version || '').trim(); }
   catch { return ''; }
 }
-// 官方 dist-tags.latest 可能滞后于实际发布（如 rc.8 已发布而 latest 停在 rc.7），
-// 因此遍历 versions 取数值最高的版本。版本解析为 5 元组 [maj,min,pa,stage,pre]：
-// alpha=1 / rc=2 / 正式版=3，使 dsh-v0.1.2-alpha.2 这类 alpha 预发布也能正确参与比较。
+// 跟随 npm 的 dist-tags.latest（官方默认发布线）；只有 registry 没给 latest 时才回退到
+// 遍历 versions 取数值最高版本。不能直接取最高 semver：例如 0.2.2-alpha.2 比 0.2.1-rc.5
+// 的下一版本线更新，但官方 latest 仍是 0.2.1-rc.5，前者只适合显式切换 alpha 通道。
 function getLatest() {
-  const r = npm('view', '@deepseek-ai/dsh', 'versions', '--json');
+  const r = npm('view', '@deepseek-ai/dsh', 'dist-tags', 'versions', '--json');
   if (!r.ok) throw new Error('npm view 失败: ' + tail(r.out));
-  let list = [];
-  try { list = JSON.parse(r.out.trim()); } catch {}
+  let data = {};
+  try { data = JSON.parse(r.out.trim()); } catch {}
+  const tagged = String(data?.['dist-tags']?.latest || '').trim();
+  if (tagged) return tagged;
+  const list = data.versions;
   if (!Array.isArray(list) || !list.length) throw new Error('npm 未返回可用版本列表: ' + tail(r.out));
   const nums = (v) => {
     const m = /^(\d+)\.(\d+)\.(\d+)(?:-(alpha|rc)\.(\d+))?/.exec(String(v).trim());
@@ -731,11 +741,57 @@ function patchTypertCodecCompat() {
   if (!txt) return { changed: false };
   if (txt.includes(MARK + ': typert codec')) return { changed: false };
   const anchor = 'if (typeof codec.create !== "function") throw new Error(`typert-loader: ${pkgName} ${subject} has no create() factory`);';
-  if (!txt.includes(anchor)) throw new Error('typert-loader 补丁锚点缺失(create 工厂)，需手动处理: ' + TYPERT_LOADER_FILE);
   const inject =
     '/* ' + MARK + ': typert codec —— 0.1.x 清单写 {mode,typeSymbol,schema}，0.2.x 改要 create() 工厂；就地从 schema 补。 */\n' +
     '\tif (typeof codec.create !== "function" && codec.schema !== void 0) codec.create = () => codec.schema;\n';
-  writeFileSync(TYPERT_LOADER_FILE, txt.split(anchor).join(inject + anchor));
+  if (txt.includes(anchor)) {
+    writeFileSync(TYPERT_LOADER_FILE, txt.split(anchor).join(inject + anchor));
+    return { changed: true };
+  }
+  // 0.2.1-rc.5 把 create() 校验下沉到 requireSchemaProjection(value, subject)。
+  const rc5Anchor = 'function requireSchemaProjection(pkgName, value, subject) {\n\tif (typeof value.create !== "function") throw new Error(`typert-loader: ${pkgName} ${subject} has no create() factory`);';
+  if (!txt.includes(rc5Anchor)) throw new Error('typert-loader 补丁锚点缺失(create 工厂)，需手动处理: ' + TYPERT_LOADER_FILE);
+  const rc5Replacement = 'function requireSchemaProjection(pkgName, value, subject) {\n' +
+    '\t/* ' + MARK + ': typert codec —— 0.1.x 清单写 {mode,typeSymbol,schema}，0.2.x 改要 create() 工厂；就地从 schema 补。 */\n' +
+    '\tif (typeof value.create !== "function" && value.schema !== void 0) value.create = () => value.schema;\n' +
+    '\tif (typeof value.create !== "function") throw new Error(`typert-loader: ${pkgName} ${subject} has no create() factory`);';
+  writeFileSync(TYPERT_LOADER_FILE, txt.split(rc5Anchor).join(rc5Replacement));
+  return { changed: true };
+}
+
+// 客户端面同款补丁：dsh-typert-registry 的 validateCodec 同样要求 {mode,typeSymbol,create()}，
+// 社区插件经 remote.$mount 提交的手写清单仍是 {schema}，缺 create 会让浏览器端启动即判 failed。
+// 与 loader 一样就地补 create() = () => schema（幂等，靠 MARK 去重）。
+function patchRegistryCodecCompat() {
+  const changedFiles = [];
+  const patchGate = (file, indent) => {
+    const txt = readFileSafe(file);
+    if (!txt || txt.includes(MARK + ': typert codec')) return;
+    const anchor = indent + 'if (typeof codec.create !== "function") throw new Error(`typert: ${subject} strict codec has no create() factory`);';
+    if (!txt.includes(anchor)) throw new Error('typert-registry 补丁锚点缺失(create 工厂)，需手动处理: ' + file);
+    const inject =
+      indent + '/* ' + MARK + ': typert codec —— 0.1.x 清单写 {mode,typeSymbol,schema}，0.2.x 改要 create() 工厂；就地从 schema 补。 */\n' +
+      indent + 'if (typeof codec.create !== "function" && codec.schema !== void 0) codec.create = () => codec.schema;\n';
+    writeFileSync(file, txt.split(anchor).join(inject + anchor));
+    changedFiles.push(file);
+  };
+  patchGate(TYPERT_REGISTRY_CLIENT_FILE, '\t\t\t');
+  patchGate(TYPERT_REGISTRY_FILE, '\t');
+  return { changed: changedFiles.length > 0 };
+}
+
+// dsh-skin-manager@0.1.6 依赖的客户端服务 settingsScope 在 0.2.x 被移除(改名 settingsSchema/configForms)；
+// 插件只在 inject 声明、apply 里从未使用它 → 永远 pending。就地移出 inject 列表。
+function patchSkinManagerScope() {
+  const txt = readFileSafe(SKIN_MANAGER_CLIENT_FILE);
+  if (!txt) return { changed: false };
+  if (txt.includes(MARK + ': skin-manager inject')) return { changed: false };
+  const anchor = '\t\tconst inject = ["slots", "locale", "settingsScope", "connection", "remote"];';
+  if (!txt.includes(anchor)) throw new Error('dsh-skin-manager 补丁锚点缺失(inject 列表)，需手动处理: ' + SKIN_MANAGER_CLIENT_FILE);
+  const replacement =
+    '\t\t/* ' + MARK + ': skin-manager inject —— 0.2.x 客户端设置不再提供 settingsScope(0.1.0-rc.x 后改名 settingsSchema/configForms)；仅声明未使用，移除以免永久 pending。 */\n' +
+    '\t\tconst inject = ["slots", "locale", "connection", "remote"];';
+  writeFileSync(SKIN_MANAGER_CLIENT_FILE, txt.split(anchor).join(replacement));
   return { changed: true };
 }
 
@@ -747,11 +803,16 @@ function patchAll() {
   const r16 = patchMessagesSkipNonText();
   const r17 = patchRequireBuiltinAddon();
   const r18 = patchTypertCodecCompat();
+  const r19 = patchRegistryCodecCompat();
+  const r20 = patchSkinManagerScope();
   for (const f of [CRED_FILE, SESS_FILE, PERM_FILE, ATTACH_FILE, VISUAL_FILE, CORDIS_LOADER_FILE, SETTINGS_FILE, CONN_FILE, BIN_FILE, RUNNER_FILE, WORKER_CJS_FILE, SESSION_FORMAT_FILE, SUBAGENT_FILE, MESSAGES_FILE]) {
     if (!readFileSafe(f).includes(MARK)) throw new Error('补丁校验失败(标记缺失): ' + f);
   }
   if (readFileSafe(TYPERT_LOADER_FILE) && !readFileSafe(TYPERT_LOADER_FILE).includes(MARK + ': typert codec')) {
     throw new Error('补丁校验失败(标记缺失): ' + TYPERT_LOADER_FILE);
+  }
+  for (const f of [TYPERT_REGISTRY_CLIENT_FILE, TYPERT_REGISTRY_FILE, SKIN_MANAGER_CLIENT_FILE]) {
+    if (readFileSafe(f) && !readFileSafe(f).includes(MARK)) throw new Error('补丁校验失败(标记缺失): ' + f);
   }
   if (readFileSafe(REQUIRE_BUILTIN_FILE) && !readFileSafe(REQUIRE_BUILTIN_FILE).includes(MARK)) {
     throw new Error('补丁校验失败(标记缺失): ' + REQUIRE_BUILTIN_FILE);
@@ -759,7 +820,7 @@ function patchAll() {
   if (!readFileSafe(FS_LOCAL_FILE).includes('HarmonyOS /storage mounts reject hard links')) {
     throw new Error('补丁校验失败(标记缺失): ' + FS_LOCAL_FILE);
   }
-  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed, subagentIdentity: r15.changed, messagesSkipNonText: r16.changed, requireBuiltinAddon: r17.changed, typertCodec: r18.changed };
+  return { loaders: l.changed, credential: r1.changed, session: r2.changed, permission: r3.changed, attachment: r4.changed, vision: r5.changed, cordisLoader: r6.changed, settingsCompat: r7.changed, loopbackAuth: r8.changed, fsLocal: r9.changed, importMetaMain: r10.changed, workerZlib: r11.changed, sessionVerify: r12.changed, sessionFormat: r13.changed, migrationPublish: r14.changed, subagentIdentity: r15.changed, messagesSkipNonText: r16.changed, requireBuiltinAddon: r17.changed, typertCodec: r18.changed, registryCodec: r19.changed, skinManagerScope: r20.changed };
 }
 
 // compat-loader.mjs（node v22 鸿蒙运行时 polyfill）依赖的纯 JS 包。重装核心包时它们不在依赖树里
@@ -817,6 +878,27 @@ function syncPackageJson() {
   writeFileSync(pkgFile, JSON.stringify(pkg, null, 2) + '\n');
 }
 
+// compatibility.json 是用户对「声明范围不含当前内核、但已验证可用」插件的精确版本豁免。
+// 升级 patch 线时把旧版本的豁免延续到新版本；只延续旧版本本来就有的条目，不扩大批准范围。
+function carryCompatibility(fromVersion, toVersion) {
+  if (!fromVersion || !toVersion || fromVersion === toVersion) return 0;
+  const file = join(HOME, '.dsh', 'profiles', 'web', 'compatibility.json');
+  if (!existsSync(file)) return 0;
+  let data = {};
+  try { data = JSON.parse(readFileSync(file, 'utf8')); } catch { return 0; }
+  let changed = 0;
+  for (const versions of Object.values(data)) {
+    if (!Array.isArray(versions) || !versions.includes(fromVersion) || versions.includes(toVersion)) continue;
+    versions.push(toVersion);
+    changed++;
+  }
+  if (changed > 0) {
+    writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
+    log('插件兼容豁免: ' + fromVersion + ' → ' + toVersion + ' (' + changed + ' 项)');
+  }
+  return changed;
+}
+
 // ---- 锁 / 重启 ----
 // 陈旧锁自愈：上一次被 SIGKILL/崩溃打断时锁文件会留下来，而写入者早已不在，
 // 不清就会让后续 install/rollback 永久卡在「另一操作进行中」。写入成功仍用 O_EXCL。
@@ -846,7 +928,9 @@ function stopDsh() {
   return n;
 }
 function restartDsh() {
-  const r = sh('sh', [WEB_SH], { timeout: 60000 });
+  // 插件较多的 profile 首次加载可能超过旧版 30 秒窗口；dsh-web.sh 会按运行时候选逐个重试。
+  const startTimeout = process.env.START_TIMEOUT || '120';
+  const r = sh('sh', [WEB_SH], { timeout: 300000, env: { START_TIMEOUT: startTimeout } });
   if (!r.ok) throw new Error('dsh-web.sh 重启失败: ' + tail(r.out));
 }
 export async function isUp() {
@@ -858,7 +942,8 @@ export async function isUp() {
     // 后续「当前 token 能否换到 200」由 dsh-web.sh 的 is_up(curl 任意响应)兜底。
     const res = await fetch('http://127.0.0.1:3080/', { signal: ctl.signal, redirect: 'manual' });
     clearTimeout(t);
-    return res.status >= 200 && res.status < 400;
+    // 启动早期可能先返回 404，随后才完成认证路由；只要 HTTP 层已响应就说明进程在监听。
+    return res.status >= 200 && res.status < 500;
   } catch { return false; }
 }
 
@@ -878,6 +963,7 @@ export async function install() {
   if (compat > 0) log('补齐兼容依赖: ' + compat + ' 个 (fzstd/zstd-codec)');
   log('安装完成 → ' + target);
   writeFileSync(PREV, before);
+  carryCompatibility(before, target);
   const p = patchAll();
   log('补丁: credential=' + (p.credential ? '重打' : '已存在') + ', session=' + (p.session ? '重打' : '已存在') + ', permission=' + (p.permission ? '重打' : '已存在') + ', attachment=' + (p.attachment ? '重打' : '已存在') + ', vision=' + (p.vision ? '重打' : '已存在') + ', cordisLoader=' + (p.cordisLoader ? '重打' : '已存在') + ', settingsCompat=' + (p.settingsCompat ? '重打' : '已存在') + ', loopbackAuth=' + (p.loopbackAuth ? '重打' : '已存在') + ', fsLocal=' + (p.fsLocal ? '重打' : '已存在') + ', importMetaMain=' + (p.importMetaMain ? '重打' : '已存在') + ', workerZlib=' + (p.workerZlib ? '重打' : '已存在') + ', sessionVerify=' + (p.sessionVerify ? '重打' : '已存在') + ', sessionFormat=' + (p.sessionFormat ? '重打' : '已存在'));
   const killed = stopDsh();

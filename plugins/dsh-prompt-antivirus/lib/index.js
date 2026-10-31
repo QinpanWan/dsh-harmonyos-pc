@@ -106,7 +106,8 @@ export function apply(ctx) {
     scanToolResult,
     createGuardMessage: (text) => createUserMessage({
       content: [{ type: "text", text }],
-      source: { kind: "plugin", plugin: "prompt-antivirus" }, // 无 form：released v0 插件表单封闭，"guard" 自定义表单会被官方 v0→v1 冻结校验拒绝
+      // v4 存储层拒收 kind:"plugin"（退役语法），改用 producer-owned kind（无 form，保持 v0 表单冻结校验兼容）
+      source: { kind: "plugin:prompt-antivirus" },
     }),
   });
 

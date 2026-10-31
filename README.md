@@ -522,6 +522,16 @@ MIT License，见 [LICENSE](LICENSE)。
 
 ## 更新记录
 
+### 2026-10-31 — 跟进官方 0.2.1-rc.5（npm `latest` 通道纠正 + rc.5 codec 锚点 + 插件兼容豁免继承）
+
+- **官方检测**：npm `dist-tags.latest` 为 **0.2.1-rc.5**（2026-10-29 发布），另有 `alpha` 通道的 0.2.2-alpha.2（10-27）。本机从 0.2.1-alpha.2 升到 **0.2.1-rc.5**，`dsh-update.sh check` 现返回 `upToDate: true`。
+- **更新通道**：`dsh-update.mjs` 的 `getLatest()` 改为优先读 `dist-tags.latest`，仅在 registry 缺标签时回退到最高语义版本；避免更新器把下一版本的 alpha 当成默认最新，并在升级后又被自动降回旧 rc。
+- **rc.5 补丁适配**：`dsh-typert-loader` 把 codec 的 `create()` 校验下沉到 `requireSchemaProjection()`；`patchTypertCodecCompat` 同时兼容 alpha.2 旧锚点与 rc.5 新锚点，20 项鸿蒙补丁全部命中。
+- **兼容豁免继承**：升级 patch 线时，把 `~/.dsh/profiles/web/compatibility.json` 中旧内核版本的精确豁免延续到新版本，但只延续原本已批准的条目，不扩大批准范围；本次继承 46 项。
+- **preset 注册（0.2.x）**：新增 `scripts/gen-preset-registry.mjs`，从仓库 `presets/` 生成 profile patch 的 `@deepseek-ai/dsh-agent-preset` 声明块；`dsh-hm-update.mjs` 部署预设后自动重生成。预设 persona 同步移除 0.2.x 已不再注册的 `{{cwd}}` 变量。
+- **重启健壮性**：更新器把启动健康窗口从 30 秒提高到 120 秒，并把启动早期的 HTTP 404 视为“进程已监听”，避免插件较多的 profile 被误判为启动失败。
+- **验证**：隔离目录直装 rc.5 共 617 包、补丁与 3081 探针启动通过；正式 3080 在认证后返回 200（index 41908 B）；`dsh-runtime-check` 24/24、`desktop-shell-check` 33/33、`direct-mode-check` 47/47、`session-live-check` 58/58、UI 资源 5/5、preset registry 8 套一致、huawei-devdocs enforce 9/9 + render 1/1。
+
 ### 2026-10-09 — 跟进官方 0.2.1-alpha.1 / alpha.2（大重构迁移：settings 垫片重写 + 原生 addon 纯 JS 复刻 + 6 个插件 codec 适配；本机已切到 0.2.1-alpha.2 运行）
 
 - **背景**：官方最新线是 `0.2.1-alpha.1`（2026-10-03）。它把 `dsh-settings` 从 `SettingsProvider` 重写为 `SettingsForms`（configEditor 的 Config schema 自动分区），**删掉**了 `settingsNamespace`/`installSettingsSection`/`settings.register`/`settings.get`；

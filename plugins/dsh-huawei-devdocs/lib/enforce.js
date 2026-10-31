@@ -81,7 +81,8 @@ export function lastUserIndex(messages) {
     const message = list[i];
     if (message?.role !== "user") continue;
     const source = message?.source ?? message?.pluginSource;
-    if (source?.kind === "plugin") continue; // 插件注入的守卫不是新问题
+    // 插件注入的守卫不是新问题；v4 起 kind 为 producer-owned（"plugin:<name>"），旧会话仍是 "plugin"
+    if (source?.kind === "plugin" || (typeof source?.kind === "string" && source.kind.startsWith("plugin:"))) continue;
     return i;
   }
   return -1;
