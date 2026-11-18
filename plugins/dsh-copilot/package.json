@@ -1,0 +1,36 @@
+{
+  "name": "dsh-copilot",
+  "version": "0.1.0",
+  "description": "GitHub Copilot 接入 dsh：注册 copilot / GPT-5.4 nano 等模型提供方，并提供 copilot_ask / copilot_status 工具。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "files": [
+    "lib",
+    "tests",
+    "README.md"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.2.1-rc.5",
+    "@earendil-works/pi-ai": "^1.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  }
+}

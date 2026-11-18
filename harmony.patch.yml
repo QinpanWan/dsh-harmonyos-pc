@@ -1,5 +1,19 @@
 # HarmonyOS 适配补丁：禁用依赖原生二进制(node-pty/Koffi)的插件行。
 # 鸿蒙设备无法加载原生 ELF/.node 模块，这些行会直接导致 web 启动崩溃。
+#
+# ── GitHub Copilot（鸿蒙 ProMax 默认模型）────────────────────────────────────
+# 纯 JS provider，复用 copilot-hm 的 OAuth 凭据，不写 token 到仓库。
+# dsh 的默认模型是进程级单例：这里固定 gpt-5.4-nano（Responses API，400k ctx），
+# 模型胶囊仍可切到 gpt-4.1 / gpt-4o。插件源码在 plugins/dsh-copilot/。
+- id: agent-default-model
+  name: '@deepseek-ai/dsh-agent-default-model'
+  config:
+    provider: copilot
+    model: gpt-5.4-nano
+- insert:
+    - id: copilot
+      name: dsh-copilot
+
 - id: subprocess
   disabled: true
 - id: sandbox

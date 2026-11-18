@@ -39,6 +39,7 @@
 > - **五套预设跑分（2026-08-18）**：经静态 persona 填充（前缀越过 128-token 块边界），静态前缀预设缓存命中率 52.9%–89.9% → **93.8%–98.0%**（promax 96.7%、ops 97.9%、rampagemax 98.0%），连开运行上下文的 harmony-chat 也拉到 93.8%——用数据印证「保缓存先保前缀稳定」（详见下方「性能实测」）
 > - **工具链**：GitHub 插件一键安装器、dsh 自更新器 + 设置页
 > - **全局防注入 `dsh-prompt-antivirus`**（2026-08-31 新增）：扫描工具参数 / 工具结果 / 进入模型前的消息，隔离或拦截提示注入与「上下文病毒」，每会话注入金丝雀守卫，危险工具走人工审批——profile 层挂载，对全部预设与子代理全局生效
+> - **GitHub Copilot 原生接入 `dsh-copilot`**（2026-11-19 新增）：纯 JS provider，复用 `copilot-hm` OAuth 凭据，ProMax 默认 `gpt-5.4-nano`（400k 上下文），另暴露已验证的 `gpt-4.1` / `gpt-4o`
 
 - **八套「鸿蒙对话模式」Agent 预设**：把 DeepSeek 前缀缓存命中率拉到最高，同时保留任务交付能力——`harmony-chat`（极简）/ `harmony-chat-pro`（缓存极致）/ `harmony-chat-promax`（六边形交付最强）/ `harmony-chat-ops`（常驻后台任务管家）/ `harmony-chat-rampagemax`（狂暴质量）/ `harmony-kb`（知识库专家）/ `harmony-deveco`（DevEco 全链路开发大师）/ `harmony-chat-monash`（Monash 学生版）
 - **六边形 ProMax**（2026-08-18 升级）：缓存命中 / 省 token / 交付能力 / 测试验证 / 集成闭环 / 共存防御六条硬规则同场，把「写完代码」与「系统跑起来」之间的鸿沟写成机械清单，交付纪律对标并反超主流通用 Agent
@@ -223,6 +224,26 @@ sh scripts/dsh-web.sh
 ```
 
 已内置 `dsh-hm-update.mjs` 自动部署：以后 `node scripts/dsh-hm-update.mjs` 更新时会自动把 `plugins/` 下的 profile 级插件同步到 web + headless profile。模式可在插件源码 `lib/index.js` 的 `DEFAULT_CONFIG` 调整（`quarantine` 默认 / `block` / `monitor`），`_antivirus_scan` / `_antivirus_status` 两个诊断工具随会话可用。
+
+### 2.8.1 接入 GitHub Copilot（ProMax 路由）
+
+仓库内置 `plugins/dsh-copilot/`：纯 JS、无原生依赖，复用 `copilot-hm` 的 OAuth 凭据，
+向 dsh 注册 `copilot` provider，并提供 `copilot_ask` / `copilot_status` 两个工具。
+
+```sh
+copilot-hm login          # 首次授权；之后复用本机凭据
+copilot-hm status         # 核对账号与套餐
+node scripts/dsh-hm-update.mjs update
+```
+
+`harmony.patch.yml` 已把 `agent-default-model` 固定为 `copilot/gpt-5.4-nano`，并插入
+`dsh-copilot`。该模型是 dsh 的进程级默认：鸿蒙客户端默认选中的 `harmony-chat-promax`
+新会话会直接走 Copilot GPT-5.4 nano（400k 上下文）；Web 端需在对话模式里手动选择
+ProMax（它在 `agentPresets/list` 里不是服务端默认 preset）。模型胶囊仍可切到 `gpt-4.1`
+或 `gpt-4o`。dsh 的默认模型不能按 preset 分别保存，因此 ProMax 通过 persona 路由说明
+和全局 provider 生效。
+
+完整架构、认证与验证步骤见 [`docs/GITHUB-COPILOT.md`](docs/GITHUB-COPILOT.md)。
 
 ### 3. 启动 dsh（带鸿蒙补丁）
 
@@ -521,6 +542,13 @@ MIT License，见 [LICENSE](LICENSE)。
 ---
 
 ## 更新记录
+
+### 2026-11-19 — GitHub Copilot 接入鸿蒙 ProMax
+
+- 新增 `plugins/dsh-copilot/`：纯 JS Copilot provider + `copilot_ask` / `copilot_status` 工具，复用 `copilot-hm` OAuth 凭据，不把 token 写入仓库。
+- 模型路由实测：`gpt-5.4-nano` 走 Responses API（400k 上下文、128k 输出），`gpt-4.1` / `gpt-4o` 走 Chat Completions；其它目录模型在当前套餐返回 `model_not_supported`，因此不暴露。
+- `harmony.patch.yml` 挂载 provider 并把进程级默认模型设为 `copilot/gpt-5.4-nano`；`harmony-chat-promax` persona/描述同步写入 Copilot 路由与回退策略。
+- 验证：插件单测 7/7；真实 Copilot 对话与工具调用通过；`session/modelCatalog` 的 default 为 `copilot/gpt-5.4-nano` 且 `copilot` 可路由；新建 ProMax 会话实跑回复 `promax-copilot-live-ok`，`lastUsed` / `next` 均为 Copilot nano。
 
 ### 2026-10-31 — 跟进官方 0.2.1-rc.5（npm `latest` 通道纠正 + rc.5 codec 锚点 + 插件兼容豁免继承）
 

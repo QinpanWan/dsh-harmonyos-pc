@@ -186,6 +186,25 @@ The preset ships with the `- id: deveco-bridge` mount row, so dev_* tools are av
 >
 > **`dev_code` delegation**: hands a self-contained deep sub-task to the local DevEco Code agent (OpenCode web, 127.0.0.1:4096) which runs its own agent loop. Start DevEco Code and configure DeepSeek first (`~/.deveco/deveco.jsonc`); override the address with `DEVECO_WEB_BASE`. Each delegation costs ~13K input tokens and runs serially — reserve it for deep sub-tasks (power discipline is baked into the preset persona).
 
+### 2.7 GitHub Copilot for ProMax
+
+`plugins/dsh-copilot/` registers a pure-JS `copilot` provider and reuses the `copilot-hm`
+OAuth credential. `harmony.patch.yml` mounts it and sets the process-wide default model to
+`copilot/gpt-5.4-nano` (400k context, Responses API). The HarmonyOS client selects
+`harmony-chat-promax` by default, so its new sessions use Copilot immediately. The Web UI
+requires selecting ProMax manually because it is not the server-default preset; the model
+layer still defaults every new session to Copilot. The model chip can switch to `gpt-4.1`
+or `gpt-4o`.
+
+```sh
+copilot-hm login
+copilot-hm status
+node scripts/dsh-hm-update.mjs update
+```
+
+See [`docs/GITHUB-COPILOT.md`](docs/GITHUB-COPILOT.md) for the architecture, model policy,
+and verification steps.
+
 ### 3. Start dsh (with the HarmonyOS patches)
 
 ```bash
@@ -404,6 +423,13 @@ One exception: `desktop-upstream/` is a **source snapshot** of the official desk
 ---
 
 ## Changelog
+
+### 2026-11-19 — GitHub Copilot in HarmonyOS ProMax
+
+- Added `plugins/dsh-copilot/`: a pure-JS Copilot provider plus `copilot_ask` / `copilot_status`, reusing the `copilot-hm` OAuth credential without committing tokens.
+- Verified routes: `gpt-5.4-nano` uses the Responses API (400k context / 128k output); `gpt-4.1` and `gpt-4o` use Chat Completions. Other catalog models return `model_not_supported` on this plan and are not exposed.
+- `harmony.patch.yml` mounts the provider and sets the process-wide default to `copilot/gpt-5.4-nano`; the ProMax persona/description now document the Copilot route and fallbacks.
+- Verification: plugin tests 7/7; real chat and tool call passed; `session/modelCatalog` defaults to `copilot/gpt-5.4-nano` with `copilot` routable; a fresh ProMax session replied `promax-copilot-live-ok` with Copilot nano as both `lastUsed` and `next`.
 
 ### 2026-10-31 — Follow upstream 0.2.1-rc.5 (npm `latest` channel correction + rc.5 codec anchor + compatibility carry-forward)
 

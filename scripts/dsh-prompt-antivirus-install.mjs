@@ -90,6 +90,8 @@ function registerWebManifest(web, pluginsSrc, pluginName) {
   const manifestPath = join(web, "package.json");
   if (!existsSync(manifestPath)) die(`找不到 web profile 清单: ${manifestPath}`);
   const manifest = readJson(manifestPath);
+  const pluginManifest = readJson(join(pluginsSrc, "package.json"));
+  const hasBundle = pluginManifest.dsh?.bundle !== undefined;
   let changed = false;
   manifest.dependencies ??= {};
   if (!manifest.dependencies[pluginName]) {
@@ -99,13 +101,15 @@ function registerWebManifest(web, pluginsSrc, pluginName) {
   manifest.dsh ??= {};
   manifest.dsh.profile ??= {};
   manifest.dsh.profile.bundles ??= [];
-  if (!manifest.dsh.profile.bundles.includes(pluginName)) {
+  // 只有声明 dsh.bundle.patch 的包才属于 profile bundle；普通插件由
+  // cordis.patch.yml / harmony.patch.yml 的 insert 行加载，不能混进 bundles。
+  if (hasBundle && !manifest.dsh.profile.bundles.includes(pluginName)) {
     manifest.dsh.profile.bundles.push(pluginName);
     changed = true;
   }
   if (changed) {
     writeJson(manifestPath, manifest);
-    log(`  package.json: 已注册 dependencies + bundles（${pluginName}）`);
+    log(`  package.json: 已注册 dependencies${hasBundle ? ' + bundles' : ''}（${pluginName}）`);
   } else {
     log(`  package.json: 已是最新，跳过`);
   }
@@ -121,8 +125,9 @@ function patchHeadless(headless, pluginName) {
     log(`  headless cordis.patch.yml: 已存在，跳过`);
     return false;
   }
+  const purpose = pluginName === "dsh-prompt-antivirus" ? "全局防注入" : "profile 级插件";
   const block = `
-# --- ${pluginName} (全局防注入; 共享 profiles/node_modules 软链) ---
+# --- ${pluginName} (${purpose}; 共享 profiles/node_modules 软链) ---
 - insert:
     - id: ${pluginName === "dsh-prompt-antivirus" ? "prompt-antivirus" : pluginName}
       name: ${pluginName}
